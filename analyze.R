@@ -158,59 +158,20 @@ y0_rev2 <- t_dt %>% filter(period %in% c('t0', 't2')) %>%
 
 
 fowler.all <- data.frame()
-for (sample_data in list(sample_dt, y0_rev, y0_rev2))
+for (sample_data in list(t_dt, y0_rev, y0_rev2))
    {
      ESM_depths <- list(c(10,20,30),  c(15,30), c(24,30), c(24,30, 36),
                         c(30, 36), c(15, 30,50), c(10, 30, 50), c(30, 50), 
                         c(10, 30, 50, 70), c(15, 30, 45, 60, 75))
      MC_depths <- list(c(10,20,30),  c(15,30), c(24,30), c(10, 30), c(30))
-     fowler_sim     <- compare.methods(sample_data, ESM_depths, MC_depths)
+     fowler.sim     <- compare.methods(sample_data, ESM_depths, MC_depths)
+     fowler.sim <- fowler.sim %>% 
+            distinct(method, ID, sample_depths, .keep_all = T)  %>% merge(soc_delt_actual) %>%
+            mutate(error = soc_change - true_change_soc)
+     
      fowler.all <- rbind(fowler.all, fowler.sim)
      
 }
-# sample_dt <- sample_dt %>% filter(scenario != 's1' & depth_inc !=0)
-# 
-# #reversed sample_dt, with t0 as the ending point, and t1 as the starting point
-# y0_rev <- sample_dt %>% filter(period %in% c('t0', 't1')) %>% 
-#   mutate(Ref_ID = paste(scenario, 't1', sep = '_'))
-# 
-# #reversed sample_dt, with t0 as the ending point, and t2 as the starting point
-# y0_rev2 <- sample_dt %>% filter(period %in% c('t0', 't2')) %>% 
-#   mutate(period = paste(period, 'x', sep = '_')) %>%
-#   mutate(Ref_ID = paste(scenario, 't2_x', sep = '_'),
-#          ID = paste(scenario, period, sep = '_'))
-# 
-# 
-# fowler.all <- data.frame()
-# 
-# #run the comparisons on all 3 groups
-# for (sample_data in list(sample_dt, y0_rev, y0_rev2))
-# {
-#   ESM_depths <- list(c(10,20,30), c(10,30))
-#   MC_depths <- list(c(10,20,30), c(10,30), c(30))
-#   
-#   fowler_sim10 <- sample_data %>% filter(interval == '10') %>% VanHadenFD.from.Fowler.dt() %>% 
-#     compare.methods(ESM_depths = ESM_depths, MC_depths = MC_depths) 
-#   
-#   fowler_sim15 <- sample_data %>% filter(interval == '15') %>% VanHadenFD.from.Fowler.dt() %>% 
-#     compare.methods(ESM_depths = list(c(15, 30)), MC_depths = list(c(15, 30))) 
-#   
-#   
-#   
-#   fowler_sim_deep <- sample_data %>% filter(interval == "10, 30, 50, 70") %>% 
-#     VanHadenFD.from.Fowler.dt() %>% 
-#     compare.methods(ESM_depths = list(c(10,30,50, 70), c(30,50)), MC_depths = list(c(10,30)))
-#   
-#   fowler_sim_close <- sample_data %>% filter(interval == '24, 30, 36') %>% VanHadenFD.from.Fowler.dt() %>% 
-#     compare.methods(ESM_depths = list(c(24, 30, 36), c(30, 36), c(24, 30)), 
-#                     MC_depths = list(c(24, 30) ))
-#   
-#   fowler.res <- rbind(fowler_sim10, fowler_sim15, fowler_sim_deep, fowler_sim_close) %>% 
-#     distinct(method, ID, sample_depths, .keep_all = T)  %>% merge(soc_delt_actual) %>%
-#     mutate(error = soc_change - true_change_soc)
-#   
-#   fowler.all <- rbind(fowler.all, fowler.res)
-# }
 
 
 fowler.all <- fowler.all %>% merge(fowler.all %>% filter(method == 'Single Depth') 
@@ -224,6 +185,8 @@ fowler.all <- fowler.all %>% merge(fowler.all %>% filter(method == 'Single Depth
 fowler.all %>% group_by(method, sample_depths) %>% summarize(RMSE = sqrt(mean(error**2)))
 
 
+
+#Data from the Wisconsin Integrated Cropping Systems Trial
 sanford_fd <- read.csv('Source_Data/Sanford2012_data.csv') %>% mutate(Rep = 1)
 
 sanford_res<- compare.methods(sanford_fd, ESM_depths = list(c(15, 30), c(15,30, 60), c(15, 30, 60, 90), c(30, 60)),
@@ -231,9 +194,6 @@ sanford_res<- compare.methods(sanford_fd, ESM_depths = list(c(15, 30), c(15,30, 
 
 MC_SSurgo <- run_SSurgo_Mass_Corr(lat = 43.29586, lon = -89.38068,
                      data = sanford_fd)
-
-
-
 
 sanford_res <- sanford_res %>% rbind(MC_SSurgo) %>% arrange(ID) %>% 
   tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
@@ -250,8 +210,8 @@ summary<- sanford_res %>% group_by(method, sample_depths) %>%
 
 
 
-
 #summarize the between-treatment comparisons
+#Compare the calculated differences to the benchmark (ESM on all available data)
 calced_difs <- sanford_res %>% filter(ID != 'all_t1') %>% group_by(method, sample_depths) %>% 
   reframe(changes = dif_matrix(soc_change))
 

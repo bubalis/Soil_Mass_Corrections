@@ -446,7 +446,8 @@ simulate.soil.Fowler <-function(soc_profile){
                   rename(SOC_pct = soc, BD_g_cm_3 = BD) %>% 
     filter(!is.na(Upper_cm)) %>% select(ID, SOM_pct, SOC_pct,
                                         BD_g_cm3, Upper_cm, Lower_cm, period, 
-                                        scenario) %>% mutate(Rep = 1)
+                                        scenario) %>% mutate(Rep = 1) %>% 
+                                        filter(Lower_cm >0)
   
   ref_keys <- t_dt %>% filter(period == 't0') %>% 
     select(scenario,  ID) %>% rename( Ref_ID = ID  ) %>% distinct()
