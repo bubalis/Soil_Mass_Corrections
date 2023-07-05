@@ -180,6 +180,7 @@ fowler.all <- fowler.all %>% merge(fowler.all %>% filter(method == 'Single Depth
                                    by = c('ID', 'Rep')) %>% 
   mutate(relative_error = error / abs(FD_error) ) %>% select( -c(FD_error))
 
+fowler.all <- fowler.all %>% distinct(ID, sample_depths, soc_change, .keep_all = TRUE)
 
 
 fowler.all %>% group_by(method, sample_depths) %>% summarize(RMSE = sqrt(mean(error**2)))
@@ -192,6 +193,7 @@ sanford_fd <- read.csv('Source_Data/Sanford2012_data.csv') %>% mutate(Rep = 1)
 sanford_res<- compare.methods(sanford_fd, ESM_depths = list(c(15, 30), c(15,30, 60), c(15, 30, 60, 90), c(30, 60)),
                               MC_depths = list(c(15, 30), c(30)))
 
+
 MC_SSurgo <- run_SSurgo_Mass_Corr(lat = 43.29586, lon = -89.38068,
                      data = sanford_fd)
 
@@ -199,6 +201,7 @@ sanford_res <- sanford_res %>% rbind(MC_SSurgo) %>% arrange(ID) %>%
   tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
   mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline )
 
+#set the benchmark as the ESM method using all available depths
 sanford_res <- sanford_res %>% merge(sanford_res %>% filter(sample_depths == '15, 30, 60, 90') 
                                      %>% select(ID, soc_change) %>% rename(soc_change_benchmark = soc_change)) %>% 
   mutate(dif_from_benchmark = soc_change - soc_change_benchmark)
