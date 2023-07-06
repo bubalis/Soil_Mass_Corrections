@@ -120,7 +120,7 @@ get_SSurgo_spline_ESM<- function(lat, lon){
 #' The mass-correction factor reflects the best-guess of the ratio of SOC in the
 #' depth change layer to equivalent mass and the SOC in the whole 30-cm profile. 
 #' 
-Ssurgo_spline_MC <- function(cum_min_mass_t0,
+Ssurgo_spline_MC <- function(cum_min_soil_t0,
                              cum_min_soil_t1, 
                              cum_SOC_to_depth_t1, 
                              fitted.spline){
