@@ -129,9 +129,10 @@ source("data_sim.R")
 fowler_sim_data <- simulate.soil.Fowler(soc_profile)
 
 
-folwer_dt < - fowler_sim_data$fowler_dt
-sample_dt <- fowler_sim_data$sample_dt
+#folwer_dt < - fowler_sim_data$fowler_dt
+#sample_dt <- fowler_sim_data$sample_dt
 
+t_dt <- fowler_sim_data$t_dt
 soc_delt_actual <-  fowler_sim_data$true_delta_soc
 
 soc_delt_actual <- soc_delt_actual %>% 
@@ -239,11 +240,14 @@ for ( i in seq(1: nrow(dist))){
   RMSE_perc <- sqrt(mean(colMeans(perc_difs **2, na.rm = T)))
   mean_absolute_perc_err <- mean(colMeans(abs(perc_difs), na.rm = T))
   mean_absolute_err <- mean(colMeans(abs(difs), na.rm = T))
+  .bias <- mean(difs[upper.tri(difs)])
+  
   differences_summary <- rbind(differences_summary,
                                data.frame(method = .method, sample_depths = .sample_depths,
                                           RMSE_differences = RMSE, RMSE_differences_perc = RMSE_perc,
                                           mean_absolute_perc_err_dif = mean_absolute_perc_err,
-                                          difs_err = mean_absolute_err))
+                                          difs_err = mean_absolute_err,
+                                          bias = .bias))
 }
 
 sanford_summary <- merge(summary, differences_summary )

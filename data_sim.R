@@ -443,7 +443,7 @@ simulate.soil.Fowler <-function(soc_profile){
   t_dt <- t_dt %>% mutate(Lower_cm = depth, Upper_cm = lag(depth), 
                   SOM_pct = soc * 1.9, 
                   ID = paste(scenario, period, sep = '_' )) %>% 
-                  rename(SOC_pct = soc, BD_g_cm_3 = BD) %>% 
+                  rename(SOC_pct = soc, BD_g_cm3 = BD) %>% 
     filter(!is.na(Upper_cm)) %>% select(ID, SOM_pct, SOC_pct,
                                         BD_g_cm3, Upper_cm, Lower_cm, period, 
                                         scenario) %>% mutate(Rep = 1) %>% 
