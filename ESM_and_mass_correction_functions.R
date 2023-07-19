@@ -129,13 +129,14 @@ Ssurgo_spline_MC <- function(cum_min_soil_t0,
   
   y <-  fitted.spline(xout, deriv = 0)
   # SOC % of mass to measurement depth, reference soil:
-  soc_content_depth_layer_2 <- y[2] / cum_min_soil_t0
+  
+  soc_content_depth_layer_2 <- y[2] / cum_min_soil_t1
   
   # SOC % of mass in depth change layer, reference soil:
   soc_content_change_layer <- (y[2]- y[1]) / (cum_min_soil_t1 - cum_min_soil_t0)
   
   adjustment_factor <- soc_content_change_layer / soc_content_depth_layer_2
-  print(adjustment_factor)
+  #print(adjustment_factor)
   
   return(adjustment_factor)
 }
@@ -525,7 +526,7 @@ run_SSurgo_Mass_Corr <- function(lat, lon, data){
                                     cum_min_soil_t1,
                                     cum_soc_to_depth_t1,
                                     fitted.spline)
-    print(adj_factor)
+    #print(adj_factor)
     return(mass_correction_single_depth(cum_min_soil_t0,
                            cum_min_soil_t1,
                            cum_soc_to_depth_t1,
