@@ -6,6 +6,7 @@ library(openxlsx)
 library(soilDB)
 
 library(sf)
+library(R.cache)
 
 
 
@@ -73,8 +74,9 @@ df_agg_to_depths <- function(soil_data, new_depths){
   
 }
 
-
-get_SSurgo_spline_ESM<- function(lat, lon){
+get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
+  print('Making API Call')
+  if (!is.null(lat) & !is.null(lon)){
   DT_sf <- data.table(longitude= lon,
                       latitude = lat) %>%
     st_as_sf(coords = c("longitude", "latitude"), 
@@ -91,6 +93,12 @@ get_SSurgo_spline_ESM<- function(lat, lon){
     as_Spatial = T
   ) %>% data.frame()
   
+  
+  }else if (!is.null(muname)){
+    q <-  paste0("SELECT muname, mukey FROM mapunit
+    WHERE muname = '",muname, "'" )
+    res <- SDA_query(q)
+  }
   vals <- paste(unique(res$mukey), sep = ' , ' , collapse = ",")
   
   q2 <- paste0("SELECT compname, om_h, om_l, om_r, dbovendry_l,  hzdept_l, hzdept_r, hzdept_h, hzdepb_l, hzdepb_r, hzdepb_h,  dbovendry_r, dbovendry_h, mukey, comppct_r,  hzname  FROM component 
@@ -103,16 +111,60 @@ get_SSurgo_spline_ESM<- function(lat, lon){
   #here we set up data to make a spline on the SSurgo data
   # filter to the most common component (in the future, incorporate all components for uncertainty)
   # explore uncertainty by using the high and low values in addition to the means? 
-  dt <- r2 %>% filter(comppct_r == max(r2$comppct_r)) %>% arrange(hzdept_r) %>% 
+  
+  #instead, we can just return ALL data that matches, then weight obs for the spline / 
+  # exponential decay by comppct or other
+  #
+  mukey_to_keep <- dplyr::filter(r2, comppct_r == max(r2$comppct_r)) %>% dplyr::pull(mukey) %>% 
+    table()  %>% names() %>% dplyr::first()
+  
+  dt <- r2 %>% filter(comppct_r == max(r2$comppct_r) & mukey == mukey_to_keep) %>% arrange(hzdept_r) %>% 
     mutate(cumulative_soil_mass = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) )) %>% 
     mutate(cumulative_soc = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) * om_r/1.9/100 )) %>% 
     mutate(cumulative_min_soil = cumulative_soil_mass - (cumulative_soc * 1.9))
+  
+  return(dt)}
+
+get_ssurgo_depth_dat <- addMemoization(get_ssurgo_depth_dat)
+
+get_SSurgo_exp_decay_params <- function(lat, lon, muname){
+  d <- get_ssurgo_depth_dat(lat,lon, muname)
+  xdata <-d$hzdepb_r
+  ydata <- d$cumulative_soc
+  m <- nls(ydata ~ -(a/b) * (exp(-b * xdata) -1), 
+           start =  list(a = .1, b = .1))
+  a <- summary(m)$coef[1,1]
+  b <- summary(m)$coef[2,1]
+  return (list(a = a, b =b))
+  
+}
+
+get_SSurgo_spline_ESM<- function(lat, lon, muname){
+  dt <- get_ssurgo_depth_dat(lat,lon, muname)
   
   fitted.spline <-  splinefun(x=c(0, dt$cumulative_min_soil), 
                               y=c(0, dt$cumulative_soc),
                               
                               method="hyman")
   return (fitted.spline)  
+}
+
+SSurgo_exp_ESM <- function(cum_min_soil_t0,
+                          cum_min_soil_t1, 
+                          cum_SOC_to_depth_t1,
+                          a, b, 
+                          depth_of_quant = 30){
+  print('Quantifying to')
+  print(depth_of_quant)
+  adj_depth <- cum_min_soil_t0/ cum_min_soil_t1 * depth_of_quant
+  
+  quant_depths <- c(depth_of_quant, adj_depth)
+  yout <- -(a/b) * (exp(-b * quant_depths)-1)
+  soc_ratio <- cum_SOC_to_depth_t1 / yout[1]
+  
+  soc_estimate <- soc_ratio * yout[2]
+  
+  return(soc_estimate)
 }
 
 
@@ -507,16 +559,19 @@ dif_matrix <- function(v){
   return(m)}
   
 
-run_SSurgo_Mass_Corr <- function(lat, lon, data){
+run_SSurgo_Mass_Corr <- function(lat = NULL, lon = NULL, muname = NULL, data, 
+                                 depth_of_estimate = 30 ){
   
   
   fitted.spline <- get_SSurgo_spline_ESM(lat = lat,
-                                         lon = lon)
+                                         lon = lon,
+                                         muname = muname)
   
-  one_depth <- data %>% df_agg_to_depths(c(30)) %>% calc.cumulative_masses()
+  print(depth_of_estimate)
+  one_depth <- data %>% df_agg_to_depths(c(depth_of_estimate)) %>% calc.cumulative_masses()
   Ids <- one_depth %>% filter(ID != Ref_ID) %>% pull(ID) 
   
-  use_ssurgo_for_MC <- function(ID_){
+  use_ssurgo_for_MC_spline <- function(ID_){
     .Ref_ID <- filter(one_depth, ID == ID_) %>% pull(Ref_ID) %>% first()
     cum_min_soil_t0 <- filter(one_depth, ID == .Ref_ID) %>% pull(Cum_Min_Soil_g_cm2)
     cum_min_soil_t1 <- filter(one_depth, ID == ID_) %>% pull(Cum_Min_Soil_g_cm2)
@@ -536,12 +591,35 @@ run_SSurgo_Mass_Corr <- function(lat, lon, data){
   
   
   
-  res <- sapply(Ids, use_ssurgo_for_MC)
+  res <- sapply(Ids, use_ssurgo_for_MC_spline)
   MC_SSurgo <- data.frame(Cum_SOC_g_cm2 =res, ID = names(res),
-                          method = 'Mass Correction, SSurgo',
-                          sample_depths = 30, Rep = 1, Cum_SOC_g_cm2_baseline = NA,
+                          method = 'Mass Correction, SSurgo_spline',
+                          sample_depths = depth_of_estimate, Rep = 1, Cum_SOC_g_cm2_baseline = NA,
       
                                         soc_change = NA)
-  return (MC_SSurgo)
+  
+  exp_decay_factors <- get_SSurgo_exp_decay_params(lat, lon, muname)
+  use_ssurgo_for_MC_EXP <- function(ID_){
+    .Ref_ID <- filter(one_depth, ID == ID_) %>% pull(Ref_ID) %>% first()
+    cum_min_soil_t0 <- filter(one_depth, ID == .Ref_ID) %>% pull(Cum_Min_Soil_g_cm2)
+    cum_min_soil_t1 <- filter(one_depth, ID == ID_) %>% pull(Cum_Min_Soil_g_cm2)
+    cum_soc_to_depth_t1 <- filter(one_depth, ID == ID_) %>% pull(Cum_SOC_g_cm2)
+    
+    return(SSurgo_exp_ESM(cum_min_soil_t0,
+                          cum_min_soil_t1, 
+                          cum_soc_to_depth_t1,
+                          a = exp_decay_factors$a, b = exp_decay_factors$b, 
+                          depth_of_quant = depth_of_estimate))
+    
+  }
+  res2 <- sapply(Ids, use_ssurgo_for_MC_EXP)
+  MC_ssurgo_2 <- data.frame(Cum_SOC_g_cm2=res2, ID = names(res2),
+             method = 'Mass Correction, SSurgo EXP',
+             sample_depths = depth_of_estimate, Rep = 1, Cum_SOC_g_cm2_baseline = NA,
+             
+             soc_change = NA)
+  
+  return (rbind(MC_SSurgo, MC_ssurgo_2))
 }
+
 

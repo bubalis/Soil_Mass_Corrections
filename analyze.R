@@ -36,7 +36,9 @@ compare.methods <- function(fd_data,  ESM_depths, MC_depths,
   
   
   for (depth_vals in ESM_depths){
-    ESM_res <- fd_data %>% df_agg_to_depths(depth_vals) %>% 
+    ESM_res <-  rbind(df_agg_to_depths(fd_data %>% filter(ID != Ref_ID), depth_vals),
+                          df_agg_to_depths(fd_data %>% filter(ID == Ref_ID), c(depth_of_estimate))
+                                 )%>% 
       calc_ESM_VanHaden(T, depth_vals) %>% 
       filter(Lower_cm == depth_of_estimate) %>% #only keep the estimate for the depth we are calculating
       mutate(sample_depths = paste(depth_vals, collapse = ', '),
@@ -45,14 +47,17 @@ compare.methods <- function(fd_data,  ESM_depths, MC_depths,
   }
   
   for (depth_vals in MC_depths){
-    to_depths <- fd_data %>% df_agg_to_depths(depth_vals)
+    print(depth_vals)
+    to_depths <-  rbind(df_agg_to_depths(fd_data %>% filter(ID != Ref_ID), depth_vals),
+                        df_agg_to_depths(fd_data %>% filter(ID == Ref_ID), c(depth_of_estimate))
+    )
     
     mass_correction_res <- to_depths %>% 
       group_run_MC(adjustment_factor = 1, quantification_depth = depth_of_estimate) %>% 
       mutate(method = "Mass Correction", 
              sample_depths = paste(depth_vals, collapse = ', '))
     
-    mass_corr_unbiased_res <- to_depths %>% df_agg_to_depths(depth_vals) %>% 
+    mass_corr_unbiased_res <- to_depths %>% 
       group_run_MC(adjustment_factor = 'standard_correction',  quantification_depth = depth_of_estimate) %>% 
       mutate(method = "Mass Correction, SOC_corrected?", 
              sample_depths = paste(depth_vals, collapse = ', '))
@@ -83,6 +88,59 @@ mut_Ref_ID <- function(id){
 }
 
 
+#'Calculate the mass change to depth of quantification
+mass_change <- function(FD_data, quant_depth){
+  cum_FD <- calc.cumulative_masses(FD_data) 
+  
+  return (cum_FD %>% filter(ID != Ref_ID & Lower_cm == quant_depth) %>% 
+    merge(cum_FD %>% filter(Lower_cm == quant_depth) %>% select(ID, Cum_Min_Soil_g_cm2), 
+          by.x = 'Ref_ID', by.y = 'ID') %>% 
+    mutate(mass.change = Cum_Min_Soil_g_cm2.x -  Cum_Min_Soil_g_cm2.y) %>% 
+    select(ID, mass.change))
+  
+}
+
+
+#'Compare all individual treatment/core data to every possible ref
+space_for_time_comparison <- function(FD_data, lat, lon, muname, 
+                                      ESM_depths, MC_depths, depth_of_estimate = 30){
+  all_out <- data.frame()
+  rep <- 0
+  for (.ID in unique(FD_data$ID)){
+    FD_data <- FD_data %>% mutate(Ref_ID = .ID) 
+    rep = rep+1
+    res<- compare.methods(FD_data, ESM_depths = ESM_depths,
+                          MC_depths = MC_depths, 
+                          depth_of_estimate = depth_of_estimate)
+    
+    
+    MC_SSurgo <- run_SSurgo_Mass_Corr(lat = lat, lon = lon, muname = muname, 
+                                      data = FD_data, 
+                                      depth_of_estimate = depth_of_estimate)
+    
+    res <- res %>% rbind(MC_SSurgo) %>% arrange(ID) %>% 
+      tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
+      mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline, Rep = rep )
+    res <- res %>% merge( mass_change(FD_data, depth_of_estimate), by = 'ID')
+    
+    all_out <- rbind(all_out, res)
+    
+  }
+  
+  max_depths <- all_out %>% filter(nchar(sample_depths) == max(nchar(sample_depths))) %>% 
+    pull(sample_depths) %>% first()
+  all_out <- all_out %>% merge(all_out %>% filter(sample_depths == max_depths) 
+                       %>% select(ID, soc_change, Rep) %>% 
+                         rename(soc_change_benchmark = soc_change)) %>% 
+    mutate(dif_from_benchmark = soc_change - soc_change_benchmark) %>% 
+    left_join(mass_change(FD_data, depth_of_estimate))
+  
+  
+  summary<- all_out %>% group_by(method, sample_depths) %>% 
+    summarize(RMSE_from_benchmark = sqrt(mean(dif_from_benchmark**2)), 
+              Bias.from.benchmark = mean(dif_from_benchmark * ifelse(mass.change >0, 1, -1)))
+  return (list(summary = summary, res = all_out))
+}
 
 
 
@@ -205,12 +263,12 @@ sanford_res <- sanford_res %>% rbind(MC_SSurgo) %>% arrange(ID) %>%
 #set the benchmark as the ESM method using all available depths
 sanford_res <- sanford_res %>% merge(sanford_res %>% filter(sample_depths == '15, 30, 60, 90') 
                                      %>% select(ID, soc_change) %>% rename(soc_change_benchmark = soc_change)) %>% 
-  mutate(dif_from_benchmark = soc_change - soc_change_benchmark)
+  mutate(dif_from_benchmark = soc_change - soc_change_benchmark) %>% merge(mass_change(sanford_fd, 30))
 
 
 summary<- sanford_res %>% group_by(method, sample_depths) %>% 
   summarize(RMSE_from_benchmark = sqrt(mean(dif_from_benchmark**2)), 
-            Bias.from.benchmark = mean(dif_from_benchmark))
+            Bias.from.benchmark = mean(dif_from_benchmark * ifelse(mass_change >0, 1, -1)))
 
 
 
@@ -251,3 +309,127 @@ for ( i in seq(1: nrow(dist))){
 }
 
 sanford_summary <- merge(summary, differences_summary )
+
+
+
+
+
+franz_FD <- read.csv('Source_data/Franzluebbers_2013.csv')  %>% mutate(Rep = 1)
+muname <- "Cecil fine sandy loam, 2 to 6 percent slopes"  
+ESM_depths <- list(c(20, 40), c(20,40, 60), c(20, 40, 60, 90), c(40, 60), 
+                  c(20, 40 ,60, 90, 120), c(20, 40 ,60, 90, 120, 150))
+MC_depths <- list(c(20, 40), c(40))
+
+
+franz_summary <- space_for_time_comparison(franz_FD, lat= NULL, lon = NULL,
+                                           muname = muname, ESM_depths = ESM_depths,
+                                           MC_depths = MC_depths, depth_of_estimate = 40)
+
+
+
+sainju_FD <- read.csv('Source_data/Sainju_2013.csv') %>% mutate(Rep = 1)
+muname <- 'Dooley sandy loam, 0 to 4 percent slopes'
+ESM_depths = list(c(15, 30), c(15,30, 60), c(15, 30, 60, 90), c(30, 60), c(7.5, 15, 30, 60),
+                  c(7.5, 15, 30, 60, 90, 120), c(7.5, 15,30))
+MC_depths = list(c(15, 30), c(30), c(7.5, 15, 30))
+
+sainju_summary <- space_for_time_comparison(sainju_FD, lat = NULL, lon = NULL, 
+                                            muname = muname, ESM_depths = ESM_depths,
+                                            MC_depths = MC_depths)
+
+
+
+mishra_soil_types = list(NAEW = 'Westmoreland silt loam, 3 to 8 percent slopes', #2-6% slopes
+                           WARS = 'Crosby silt loam, 0 to 2 percent slopes',
+                         NWARS = 'Hoytville silty clay loam, 0 to 2 percent slopes',
+                         Delaware = 'Glynwood silt loam',
+                         Coshocton = 'Allegheny silt loam',
+                         Hoytville = 'Hoytville clay loam')
+
+
+mishra_fd <- read.csv('Source_data/mishra_2010.csv') %>% mutate(Rep = 1)
+
+mishra_ESM <- list(c(10, 20, 30, 40), c(20, 30), c(10,20,30),
+                   c(20, 40), c(30, 40), c(20,30, 40))
+mishra_MC <- list(c(20, 30), c(10, 20, 30), c(10, 30), c(30))
+
+res_NAEW <- space_for_time_comparison(mishra_fd %>% filter(site == 'NAEW'),
+                                      muname = 'Westmoreland silt loam, 3 to 8 percent slopes',
+                                      ESM_depths = mishra_ESM,
+                                      MC_depths = mishra_MC, lat = NULL, lon = NULL)
+
+res_WARS <- space_for_time_comparison(mishra_fd %>% filter(site == 'WARS'),
+                                      muname = 'Crosby silt loam, 0 to 2 percent slopes',
+                                      ESM_depths = mishra_ESM,
+                                      MC_depths = mishra_MC, lat = NULL, lon = NULL)
+
+res_NWARS <- space_for_time_comparison(mishra_fd %>% filter(site == 'NWARS'),
+                                       muname = 'Hoytville silty clay loam, 0 to 1 percent slopes',
+                                       ESM_depths = mishra_ESM,
+                                       MC_depths = mishra_MC, lat = NULL, lon = NULL)
+
+res_DEL <- space_for_time_comparison(mishra_fd %>% filter(site == 'NWARS'),
+                                     #note: slope data not given in paper
+                                     muname = 'Glynwood silt loam, 0 to 2 percent slopes',
+                                     ESM_depths = mishra_ESM,
+                                     MC_depths = mishra_MC, lat = NULL, lon = NULL)
+
+res_Cos<- space_for_time_comparison(mishra_fd %>% filter(site == 'NWARS'),
+                                     #note: slope data not given in paper
+                                     muname = 'Allegheny silt loam, 0 to 3 percent slopes',
+                                     ESM_depths = mishra_ESM,
+                                     MC_depths = mishra_MC, lat = NULL, lon = NULL)
+
+res_Hoyt <- space_for_time_comparison(mishra_fd %>% filter(site == 'NWARS'),
+                                      #note: slope data not given in paper, but this is the only
+                                      #muname for Hoytville clay
+                                      muname = 'Hoytville clay loam, 0 to 1 percent slopes',
+                                      ESM_depths = mishra_ESM,
+                                      MC_depths = mishra_MC, lat = NULL, lon = NULL)
+  
+
+#exclude data/comparisons from woodlots
+ag_comparisons_summary <- rbind(res_NAEW$res, res_WARS$res, res_NWARS$res, 
+                                res_DEL$res, res_Cos$res, res_Hoyt$res) %>% 
+  filter(Rep %in% c(1,2) & ID %in% c('NT', 'CT')) %>% 
+  group_by(method, sample_depths) %>% summarise(RMSE = sqrt(mean(dif_from_benchmark**2)), 
+                                                bias = mean(dif_from_benchmark * ifelse(mass.change>0, 1, -1)))
+ 
+#just the comparisons that include the woodlots                                    
+rbind(res_NAEW$res, res_WARS$res, res_NWARS$res, res_DEL$res, res_Cos$res, res_Hoyt$res) %>% 
+  filter(Rep == 3 | ID == 'WL') %>% 
+  group_by(method, sample_depths) %>% summarise(RMSE = sqrt(mean(dif_from_benchmark**2)),
+                                                bias = mean(dif_from_benchmark * ifelse(mass.change>0, 1, -1)))
+
+
+
+vanDoren_fd <- read.csv('Source_data/Van_doren_1986.csv') %>% mutate(Rep = 1)
+
+muname <- 'Wooster silt loam, 2 to 6 percent slopes'
+
+
+
+ESM_depths <- list(c(5, 10, 15,20, 25, 30,35, 40, 45), c(30, 45), c(25, 30, 35), c(15,30, 45), 
+                   c(20, 30, 40),
+                   c(25,30, 35), c(10, 20, 30), c(15, 30), c(20, 30))
+MC_depths <- list(c(30), c(15,30), c(20, 30), c(25, 30), c(10, 20, 30))
+
+vanDoren_res<- compare.methods(vanDoren_fd, ESM_depths, MC_depths)
+
+MC_SSurgo <- run_SSurgo_Mass_Corr(lat = NULL, lon = NULL,
+                                  muname,
+                                  data = vanDoren_fd )
+
+vanDoren_res <- vandDoren_res %>% rbind(MC_SSurgo) %>% arrange(ID) %>% 
+  tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
+  mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline )
+
+
+vanDoren_res <- vanDoren_res %>% merge(vanDoren_res %>% filter(sample_depths == '5, 10, 15,20, 25, 30,35, 40, 45') 
+                                     %>% select(ID, soc_change) %>% rename(soc_change_benchmark = soc_change)) %>% 
+  mutate(dif_from_benchmark = soc_change - soc_change_benchmark) %>% merge(mass_change(sanford_fd, 30))
+
+
+summary<- vanDoren_res %>% group_by(method, sample_depths) %>% 
+  summarize(RMSE_from_benchmark = sqrt(mean(dif_from_benchmark**2)), 
+            Bias.from.benchmark = mean(dif_from_benchmark * ifelse(mass_change >0, 1, -1)))
