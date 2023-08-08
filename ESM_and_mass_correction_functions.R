@@ -88,7 +88,7 @@ get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
     geomIntersection = T,
     #byFeature = T,
     db = "SSURGO",
-    idcol = "gid",
+    #idcol = "gid",
     query_string = FALSE,
     as_Spatial = T
   ) %>% data.frame()
@@ -115,10 +115,12 @@ get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
   #instead, we can just return ALL data that matches, then weight obs for the spline / 
   # exponential decay by comppct or other
   #
-  mukey_to_keep <- dplyr::filter(r2, comppct_r == max(r2$comppct_r)) %>% dplyr::pull(mukey) %>% 
+  mukey_to_keep <- dplyr::filter(r2, !is.na(comppct_r) & !is.na(dbovendry_r) & comppct_r == max(r2$comppct_r, na.rm = T)) %>% 
+    dplyr::pull(mukey) %>% 
     table()  %>% names() %>% dplyr::first()
   
-  dt <- r2 %>% filter(comppct_r == max(r2$comppct_r) & mukey == mukey_to_keep) %>% arrange(hzdept_r) %>% 
+  dt <- r2 %>% filter(comppct_r == max(r2$comppct_r, na.rm = T) & mukey == mukey_to_keep & !is.na(dbovendry_r)) %>% 
+    arrange(hzdept_r) %>% 
     mutate(cumulative_soil_mass = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) )) %>% 
     mutate(cumulative_soc = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) * om_r/1.9/100 )) %>% 
     mutate(cumulative_min_soil = cumulative_soil_mass - (cumulative_soc * 1.9))
@@ -131,8 +133,11 @@ get_SSurgo_exp_decay_params <- function(lat, lon, muname){
   d <- get_ssurgo_depth_dat(lat,lon, muname)
   xdata <-d$hzdepb_r
   ydata <- d$cumulative_soc
-  m <- nls(ydata ~ -(a/b) * (exp(-b * xdata) -1), 
-           start =  list(a = .1, b = .1))
+  m <- tryCatch({
+  nls(ydata ~ -(a/b) * (exp(-b * xdata) -1), 
+           start =  list(a = .1, b = .1), control = list(maxiter = 500))},
+  error = function(e){nls(ydata ~ -(a/b) * (exp(-b * xdata) -1), 
+    start =  list(a = .5, b = .1), control = list(maxiter = 500))})
   a <- summary(m)$coef[1,1]
   b <- summary(m)$coef[2,1]
   return (list(a = a, b =b))
@@ -489,9 +494,7 @@ linear_mass_correction <- function(intial_soil, sample, quantification_depth =30
   
 
   if (is.null(adjust_factor) | adjust_factor == 'standard_correction' ){
-    begin_last_depth <- sample %>% filter(Upper_cm < quantification_depth) %>% pull(Upper_cm) %>%
-      max() 
-    adjust_factor <- quantification_depth / (quantification_depth + begin_last_depth) * .5
+    adjust_factor <- .5
   }
   
   sample <- calc.cumulative_masses(sample)
@@ -619,7 +622,13 @@ run_SSurgo_Mass_Corr <- function(lat = NULL, lon = NULL, muname = NULL, data,
              
              soc_change = NA)
   
-  return (rbind(MC_SSurgo, MC_ssurgo_2))
+  MC_ssurgo_3 <- data.frame(Cum_SOC_g_cm2=(res + res2)/2, ID = names(res2),
+                            method = 'Mass Correction, SSurgo avg',
+                            sample_depths = depth_of_estimate, Rep = 1, Cum_SOC_g_cm2_baseline = NA,
+                            
+                            soc_change = NA)
+  
+  return (rbind(MC_SSurgo, MC_ssurgo_2, MC_ssurgo_3))
 }
 
 
