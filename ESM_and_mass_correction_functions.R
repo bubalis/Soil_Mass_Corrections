@@ -9,7 +9,11 @@ library(sf)
 library(R.cache)
 
 
-
+nan_or_null <- function(x){
+  if (length(x)>0){return (is.na(x))
+  }else{
+    return(is.null(x))}
+}
 
 #Convert the Vanhaden Format sample_dt into the Fowler format
 VanHadenFD.from.Fowler.dt <- function(sample_dt){
@@ -76,7 +80,7 @@ df_agg_to_depths <- function(soil_data, new_depths){
 
 get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
   print('Making API Call')
-  if (!is.null(lat) & !is.null(lon)){
+  if (!nan_or_null(lat) & !nan_or_null(lon)){
   DT_sf <- data.table(longitude= lon,
                       latitude = lat) %>%
     st_as_sf(coords = c("longitude", "latitude"), 
@@ -94,7 +98,7 @@ get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
   ) %>% data.frame()
   
   
-  }else if (!is.null(muname)){
+  }else if (!nan_or_null(muname)){
     q <-  paste0("SELECT muname, mukey FROM mapunit
     WHERE muname = '",muname, "'" )
     res <- SDA_query(q)
@@ -123,7 +127,9 @@ get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
     arrange(hzdept_r) %>% 
     mutate(cumulative_soil_mass = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) )) %>% 
     mutate(cumulative_soc = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) * om_r/1.9/100 )) %>% 
-    mutate(cumulative_min_soil = cumulative_soil_mass - (cumulative_soc * 1.9))
+    mutate(cumulative_min_soil = cumulative_soil_mass - (cumulative_soc * 1.9), 
+           hzdepb_r = hzdepb_r - min(hzdept_r),   hzdept_r = hzdept_r - min(hzdept_r))
+    
   
   return(dt)}
 

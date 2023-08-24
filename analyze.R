@@ -83,8 +83,10 @@ compare.methods <- function(fd_data,  ESM_depths, MC_depths,
   }
   if (!all(is.na(c(lat, lon, muname)))){
     ssurgo_res <- run_SSurgo_Mass_Corr(lat = lat, lon = lon,
-                                       muname = munam, data = fd_data,
-                                       depth_of_estimate = depth_of_estimate)
+                                       muname = muname, data = fd_data,
+                                       depth_of_estimate = depth_of_estimate)%>% 
+                              mutate(sample_depths = as.character(sample_depths))
+    
     all_res <- rbind(all_res, ssurgo_res)
   }
   
@@ -100,7 +102,7 @@ compare.methods <- function(fd_data,  ESM_depths, MC_depths,
   
   res_changes <- all_res %>% filter(ID != Ref_ID) %>% merge(baseline_data) %>%
     mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline) %>% 
-    select(ID, Rep, Cum_SOC_g_cm2, method, sample_depths, Cum_SOC_g_cm2_baseline,
+    select(ID, Rep, Ref_ID, Cum_SOC_g_cm2, method, sample_depths, Cum_SOC_g_cm2_baseline,
            soc_change)
   
   return (res_changes)
@@ -125,74 +127,90 @@ mass_change <- function(FD_data, quant_depth){
 }
 
 
-#'Compare all individual treatment/core data to every possible ref
+comparison_summarize <- function(res, FD_data, .ID, depth_of_estimate){
+  res <- res %>% arrange(ID) %>% 
+    tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
+    mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline, Ref = .ID )
+  
+  max_depths <- res %>% filter(nchar(sample_depths) == max(nchar(res$sample_depths))) %>% 
+    pull(sample_depths) %>% first()
+  res <- res %>% merge(res %>% filter(sample_depths == max_depths) %>%
+                         select(ID, soc_change, Ref) %>% 
+                         rename(soc_change_benchmark = soc_change)) %>% 
+    mutate(dif_from_benchmark = soc_change - soc_change_benchmark) %>% 
+    left_join(mass_change(FD_data, depth_of_estimate))          
+  return(res)
+}
+
 run_comparison <- function(FD_data, 
                           ESM_depths, MC_depths, 
                           depth_of_estimate = 30, 
-                          study_name){
+                          study_name, .site = NULL){
   
   site_meta <- get_site_meta(study_name)
   all_out <- data.frame()
   
-  if ('Ref_ID' %in% colnames(FD_data)){
+  #if a specific site is not specified, and each comparison is already specified
+  if (is.null(.site) & ('Ref_ID' %in% colnames(FD_data))){
       lat <- site_meta %>% pull(lat) %>% first()
       lon <- site_meta %>% pull(lon) %>% first()
       muname <- site_meta %>% pull(lon) %>% first()
       
       res <- compare.methods(FD_data, ESM_depths = ESM_depths, MC_depths = MC_depths, 
-                             lat = lat, lon = lon, muname = muname)
+                             lat = lat, lon = lon, muname = muname) %>% mutate(study_name = study_name)
     
+      all_out <- comparison_summarize(res, FD_data, 0, depth_of_estimate) %>% 
+        mutate(weight = 1)
       
-      res <- res %>% arrange(ID) %>% 
-      tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
-      mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline, Ref = 0 )
-    res <- res %>% merge( mass_change(FD_data, depth_of_estimate), by = 'ID')
-    all_out <- res
   }else{
+    
     if ('site' %in% colnames(FD_data)){
-      #if a site is listed in the data, only run comparisons between plots at the same site
+      #if a site is listed in the dataframe, only run comparisons between plots at the same site
       
-      for (.site in unique(FD_data$site)){
-        site_dat <- site_meta %>% filter(site == .site)
-        lat <- site_dat %>% pull(lat) %>% first()
-        lon <- site_dat %>% pull(lon) %>% first()
-        muname <- site_dat %>% pull(lon) %>% first()
-        new_res <- run_comparison(FD_data %>% filter(site == .site,) %>% select(-c(site)),
+      for (site_name in unique(FD_data$site)){
+        
+        new_res <- run_comparison(FD_data %>% filter(site == site_name) %>% select(-c(site)),
                                   ESM_depths = ESM_depths,
                                   MC_depths = MC_depths,
                                   depth_of_estimate = depth_of_estimate,
-                                  study_name = study_name, lat = lat, lon = lon,
-                                  muname = muname)$res
+                                  study_name = study_name, .site = site_name)$res
         all_out <- rbind(all_out, new_res)
       }
+      
+     
     }else{
-  for (.ID in unique(FD_data$ID)){
-    FD_data <- FD_data %>% mutate(Ref_ID = .ID) 
-    
-    res<- compare.methods(FD_data, ESM_depths = ESM_depths,
+      #if a site argument was passed, get location data for specific site
+      if (!is.null(.site)){
+      site_dat <- site_meta %>% filter(site == .site)}
+      
+      else{site_dat <- site_meta}
+      
+      lat <- site_dat %>% pull(lat) %>% first()
+      lon <- site_dat %>% pull(lon) %>% first()
+      muname <- site_dat %>% pull(muname) %>% first()
+  
+      
+  for (.ID in unique(FD_data$ID)){ 
+    sub_fd <- FD_data %>% mutate(Ref_ID = .ID)
+    res <- compare.methods(sub_fd, 
+                           ESM_depths = ESM_depths,
                           MC_depths = MC_depths, 
-                          depth_of_estimate = depth_of_estimate)
+                          depth_of_estimate = depth_of_estimate, 
+                          lat = lat, lon = lon, muname = muname) %>%
+      mutate(study_name = study_name) %>%
+      comparison_summarize(sub_fd, .ID, depth_of_estimate) %>% 
+      mutate(weight = 1/length(unique(FD_data$ID)))
     
-    
-    
-    res <- res %>% arrange(ID) %>% 
-      tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
-      mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline, Ref = .ID )
-    res <- res %>% merge( mass_change(FD_data, depth_of_estimate), by = 'ID')
     
     all_out <- rbind(all_out, res)
+    
+    
   }
-  }}
+      
+      
+      }
+  }
   
-  max_depths <- all_out %>% filter(nchar(sample_depths) == max(nchar(all_out$sample_depths))) %>% 
-    pull(sample_depths) %>% first()
-  
-  all_out <- all_out %>% merge(all_out %>% filter(sample_depths == max_depths) 
-                       %>% select(ID, soc_change, Ref) %>% 
-                         rename(soc_change_benchmark = soc_change)) %>% 
-    mutate(dif_from_benchmark = soc_change - soc_change_benchmark) %>% 
-    left_join(mass_change(FD_data, depth_of_estimate)) %>% 
-    mutate(study = study_name, weight = 1/ (nrow(distinct(FD_data, ID)) -1))
   
   
   summary<- all_out %>% group_by(method, sample_depths) %>% 
@@ -299,10 +317,10 @@ fowler.all %>% group_by(method, sample_depths) %>% summarize(RMSE = sqrt(mean(er
 
 
 
-time_series_comparison <- function(FD_data, ESM_depths, MC_depths, lat, lon,
-                                   muname, study_name, depth_of_estimate = 30){
+time_series_comparison <- function(FD_data, ESM_depths, MC_depths,
+                                   study_name, depth_of_estimate = 30){
   out <- run_comparison(FD_data, ESM_depths = ESM_depths,
-                                MC_depths = MC_depths)
+                                MC_depths = MC_depths, study_name = study_name)
   
   
   res <- out$res
@@ -315,9 +333,14 @@ time_series_comparison <- function(FD_data, ESM_depths, MC_depths, lat, lon,
   calced_difs <- res %>% filter(ID != 'all_t1') %>% group_by(method, sample_depths) %>% 
     reframe(changes = dif_matrix(soc_change))
   
+  
+  
   as.df <- as.data.frame(calced_difs$changes) %>% 
     mutate(method = calced_difs$method, sample_depths = calced_difs$sample_depths)
   calced_difs <- as.df
+  
+    max_depths <- as.df %>% filter(nchar(sample_depths) == max(nchar(res$sample_depths))) %>% 
+    pull(sample_depths) %>% first()
   
   benchmark_difs <- as.df %>% filter(sample_depths == max_depths) %>% 
     select(-c(method, sample_depths))
@@ -353,11 +376,6 @@ time_series_comparison <- function(FD_data, ESM_depths, MC_depths, lat, lon,
 }
 
 
-
-
-
-
-
 #franz_FD <- read.csv('Source_data/Franzluebbers_2013.csv')  %>% mutate(Rep = 1)
 #muname <- "Cecil fine sandy loam, 2 to 6 percent slopes"  
 #ESM_depths <- list(c(20, 40), c(20,40, 60), c(20, 40, 60, 90), c(40, 60), 
@@ -372,9 +390,9 @@ time_series_comparison <- function(FD_data, ESM_depths, MC_depths, lat, lon,
 
 sainju_FD <- read.csv('Source_data/Sainju_2013.csv') %>% mutate(Rep = 1)
 muname <- 'Dooley sandy loam, 0 to 4 percent slopes'
-ESM_depths = list(c(15, 30), c(15,30, 60), c(15, 30, 60, 90), c(30, 60), c(7.5, 15, 30, 60),
+ESM_depths <- list(c(15, 30), c(15,30, 60), c(15, 30, 60, 90), c(30, 60), c(7.5, 15, 30, 60),
                   c(7.5, 15, 30, 60, 90, 120), c(7.5, 15,30))
-MC_depths = list(c(15, 30), c(30), c(7.5, 15, 30))
+MC_depths <- list(c(15, 30), c(30), c(7.5, 15, 30))
 
 sainju_summary <- run_comparison(sainju_FD, ESM_depths = ESM_depths,
                                  MC_depths = MC_depths, study_name = 'Sainju_2013'
@@ -389,23 +407,29 @@ mishra_MC <- list(c(20, 30), c(10, 20, 30), c(10, 30), c(30))
 
 mishra_fd <- mishra_fd %>% mutate(ID = paste(ID, site, sep = '_'))
 
-
-for (.site in names(mishra_munames)){
-  mishra_res <- run_comparison(mishra_fd,
+mishra_res <- run_comparison(mishra_fd,
         ESM_depths = mishra_ESM, MC_depths = mishra_MC, 
-                                    tudy_name = study_name)}
+                                    study_name = study_name)
 
 vanDoren_fd <- read.csv('Source_data/Van_doren_1986.csv') %>% mutate(Rep = 1)
 
-vanDoren_sp_4_t <- run_comparison(vanDoren_fd %>% filter(!grepl('t1', ID) %>% select(-c(Ref_ID))), 
-                                           ESM_depths = ESM_depths, 
-                                           MC_depths = MC_depths, 
-                                  study_name = 'Van_doren_1986.csv')
+vanDoren_sp_4_t <- run_comparison(vanDoren_fd %>% filter(!grepl('t1', ID)) %>% select(-c(Ref_ID)), 
+                                           ESM_depths = list(c(30,40), c(20,30),
+                                                             c(20,30,40), c(30, 45),
+                                                             c(10, 20,30),
+                                                             c(10, 30),
+                                                             c(15,30), c(25, 30),
+                                                             c(25,30, 35), c(20, 30, 45),
+                                                             c(15, 30, 45),
+                                                             c(5, 10, 15, 20, 25, 30, 35, 40)),
+                                           MC_depths = list(c(25,30), c(20, 30), c(15, 30),
+                                                            c(10, 30), c(5,30), c(30)), 
+                                  study_name = 'Van_doren_1986')
 
 
 devine_fd <- read.csv('Source_Data/Devine_2014.csv') %>% mutate(Rep = 1)
 
-devine_res <-run_comparison(devine_fd,ESM_depths = list(c(5, 15,30, 50, 100),
+devine_res <-run_comparison(devine_fd, ESM_depths = list(c(5, 15,30, 50, 100),
                                                         c(5, 15, 30), 
                                                           c(15, 30), c(15,30, 50),
                                         c(15, 30, 50), c(15, 30, 50, 100), c(30,50)),
@@ -414,7 +438,6 @@ devine_res <-run_comparison(devine_fd,ESM_depths = list(c(5, 15,30, 50, 100),
                                         )
 
 blanco_fd <- read.csv('Source_Data/Blanco_Canqui(2008).csv') %>% mutate(Rep = 1)
-
 blanco_res <- run_comparison(blanco_fd, 
                              ESM_depths = list(c(5, 10, 30), c(10, 30),  c(30, 50),
                                                    c(10, 30, 50), c(10, 30, 50, 60),
@@ -430,8 +453,7 @@ blanco_res <- run_comparison(blanco_fd,
 
 venterea_fd <- read.csv('Source_data/Venterea_2006.csv') %>% mutate(Rep = 1)
 
-
-venterea_s4_t <- run_comparison(venterea_fd %>% filter(years == 2000) %>% select(-c(Ref_ID)),
+venterea_s4_t1 <- run_comparison(venterea_fd %>% filter(years == 2000) %>% select(-c(Ref_ID)),
                                            ESM_depths = list(c(5, 10, 20, 30, 45, 60),
                                                              c(30, 45), c(20, 30),
                                                              c(20, 30, 45), c(30, 60),
@@ -444,14 +466,28 @@ venterea_s4_t <- run_comparison(venterea_fd %>% filter(years == 2000) %>% select
                                            MC_depths = list(c(30), c(20, 30), c(10, 20, 30), 
                                                             c(5, 10, 20, 30)),
                                            study_name = 'Venterea_2006'
-                                           
                                            )
+
+venterea_s4_t2 <- run_comparison(venterea_fd %>% filter(years == 2005) %>% select(-c(Ref_ID)),
+                                 ESM_depths = list(c(5, 10, 20, 30, 45, 60),
+                                                   c(30, 45), c(20, 30),
+                                                   c(20, 30, 45), c(30, 60),
+                                                   c(10, 30, 45), c(5, 10, 30),
+                                                   c(10, 20, 30), c(5, 10, 20, 30),
+                                                   c(5, 10, 20, 30, 45),
+                                                   c(5, 10, 20, 30, 45, 60)
+                                                   
+                                 ),
+                                 MC_depths = list(c(30), c(20, 30), c(10, 20, 30), 
+                                                  c(5, 10, 20, 30)),
+                                 study_name = 'Venterea_2006'
+)
+
+
 
 chatterjee_fd <- read.csv('Source_data/chatterjee_2009.csv') %>% mutate(Rep = 1)
 
- 
-
-chj_res <- run_comparison(subset, 
+chj_res <- run_comparison(chatterjee_fd, 
                                 ESM_depths = list(c(5, 10, 30), c(10, 30),  c(30, 50),
                                                    c(10, 30, 50), c(10, 30, 50, 60),
                                                    c(5, 10, 30, 50, 60)),
@@ -460,13 +496,8 @@ chj_res <- run_comparison(subset,
                                    )
     
 
-
-
 blanco_fd2 <- read.csv('Source_data/Blanco-canqui_2011.csv') %>% mutate(Rep = 1)
-
-
-
-blanc_res_2 <- run_comparison(subset, ESM_depths = list(c(30,40), c(20,30), c(20,30, 40), c(30,60),
+blanc_res_2 <- run_comparison(blanco_fd2, ESM_depths = list(c(30,40), c(20,30), c(20,30, 40), c(30,60),
                                                    c(20,30,60), c(20, 30,40, 60),
                                                    c(15, 20, 30,40, 60),
                                                    c(15,30), c(10, 30),
@@ -479,11 +510,9 @@ blanc_res_2 <- run_comparison(subset, ESM_depths = list(c(30,40), c(20,30), c(20
   )
   
   
-
-
-sanford_st_res <- run_comparison(sanford_fd %>% filter(ID != Ref_ID & ID != 'all_t0') %>% 
+sanford_fd <- read.csv('Source_Data/Sanford2012_data.csv') %>% mutate(Rep = 1)
+sanford_st_res_t2 <- run_comparison(sanford_fd %>% filter(ID != Ref_ID & ID != 'all_t0') %>% 
                                             select(-c(Ref_ID)),
-                                            muname = NULL,
                                             ESM_depths = list(c(15, 30), c(15,30, 60), 
                                                         c(15, 30, 60, 90), c(30, 60)),
                                             MC_depths = list(c(15, 30), c(30)),
@@ -491,25 +520,32 @@ sanford_st_res <- run_comparison(sanford_fd %>% filter(ID != Ref_ID & ID != 'all
   
                                                                                       )
 
+sanford_st_res_t1 <- run_comparison(sanford_fd %>% filter(ID == Ref_ID & ID != 'all_t1') %>% 
+                                      select(-c(Ref_ID)),
+                                    ESM_depths = list(c(15, 30), c(15,30, 60), 
+                                                      c(15, 30, 60, 90), c(30, 60)),
+                                    MC_depths = list(c(15, 30), c(30)),
+                                    study_name = 'Sanford_2012'
+                                    
+)
 
 poffenbarger_fd <- read.csv('Source_data/poffenbarger_2020.csv') %>% mutate(Rep = 1)
-
-
-
-
- 
-poffenbarger_res <- run_comparison(subset, 
+poffenbarger_res <- run_comparison(poffenbarger_fd, 
                         ESM_depths = list(c(15, 30), 
-                        c(30, 60,), c(15,30, 60), c(15,30,60, 90) ),
+                        c(30, 60), c(15,30, 60), c(15,30,60, 90) ),
                          MC_depths = list(c(15, 30), c(30)), 
                         study_name = 'poffenbarger_2020')
                          
                          
 
-out_s4t <- rbind(res_NAEW$res, res_WARS$res, res_NWARS$res, 
-      res_DEL$res, res_Cos$res, res_Hoyt$res, blanco_res %>% mutate(Ref = 0, weight = 1), 
+out_s4t <- rbind(mishra_res$res, blanco_res$res, 
       devine_res$res, vanDoren_sp_4_t$res,
-      sainju_summary$res, sanford_st_res$res, venterea_s4_t$res, chj_res, blanc_res_2)
+      sainju_summary$res, sanford_st_res_t1$res, 
+      sanford_st_res_t2$res,
+      venterea_s4_t1$res,
+      venterea_s4_t2$res,
+      chj_res$res, blanc_res_2$res,
+      poffenbarger_res$res )
 
 
 summarize_res <- function(grouped_res){
@@ -521,22 +557,34 @@ summarize_res <- function(grouped_res){
                             mean_abs_err = mean(abs(dif_from_benchmark)))
 }
 
+out_s4t <- out_s4t %>% distinct(ID, Ref_ID, method, sample_depths, .keep_all = T)
+
+ag_res <- out_s4t %>% filter(!grepl('WL_', ID) & ID!= "Forest Succession" & !grepl('WL_', Ref_ID) & Ref_ID != "Forest Succession")
+
+ag_res %>%  group_by(method, sample_depths) %>% summarize_res() %>% 
+  filter(sample_depths %in% c('30, 40', '30, 45', '30, 50', '30, 60', '30' ))
+
+
+
 
 cross_fold_weights_res <- data.frame()
-for (study_name in unique(out_s4t$study)){
-  training_data <- out_s4t %>% filter(study != study_name)
+for (study in unique(out_s4t$study_name)){
+  training_data <- out_s4t %>% filter(study_name != study)
   sumed_dat <- training_data %>% filter(!grepl("WL", Ref) &  !grepl('WL', ID) & !grepl('Forest', ID) & !grepl('Forest', Ref)) %>%
     filter(sample_depths == 30) %>% group_by(method) %>% 
+    
     summarise(bias = weighted.mean(dif_from_benchmark * ifelse(mass.change >0, 1, -1), weight))
+  
   single_d_bias <- sumed_dat %>% filter(method == 'Single Depth') %>% 
     pull('bias') %>% first()
+  
   linear_MC_bias <- sumed_dat %>% filter(method == 'Mass Correction') %>% 
     pull('bias') %>% first()
    MC_weight <- abs(single_d_bias)/(abs(single_d_bias) + abs(linear_MC_bias))
    sd_weight <- 1-MC_weight
    testing_data <- out_s4t %>% filter(study == study_name) %>% 
      filter(!grepl("WL", Ref) &  !grepl('WL', ID) & !grepl('Forest', ID) & !grepl('Forest', Ref))
-   testing_data %>% filter(method %in% c('Single Depth', 'Mass Correction') & sample_depths == 30) %>% 
+   testing_data %>% filter(method %in% c('Single Depth', 'Mass Correction') & sample_depths == '30') %>% 
      pivot_wider(id_cols = c(ID, Ref), names_from = method, values_from = soc_change) %>% 
      mutate(soc_change = `Mass Correction` * MC_weight + `Single Depth` * sd_weight ) %>% 
      merge(testing_data %>% select(ID, Ref, soc_change_benchmark, mass.change, weight) %>% distinct(ID, Ref, .keep_all = T)) %>%
@@ -549,6 +597,10 @@ for (study_name in unique(out_s4t$study)){
 
 
 
+
+
+
+
 ### calculate time-series differences on real data
 ESM_depths <- list(c(5, 10, 15,20, 25, 30,35, 40, 45), c(30, 45), c(25, 30, 35), c(15,30, 45), 
                    c(20, 30, 40), c(30, 40),
@@ -556,8 +608,8 @@ ESM_depths <- list(c(5, 10, 15,20, 25, 30,35, 40, 45), c(30, 45), c(25, 30, 35),
 MC_depths <- list(c(30), c(15,30), c(20, 30), c(25, 30), c(10, 20, 30))
 muname <- 'Wooster silt loam, 2 to 6 percent slopes'
 
-vanDoren_res <- time_series_comparison(vanDoren_fd, ESM_depths, MC_depths, lat = NULL,
-                                       lon = NULL, muname = muname, study_name = 'van_doren_1986')
+vanDoren_res <- time_series_comparison(vanDoren_fd, ESM_depths, MC_depths, 
+                                       study_name = 'van_doren_1986')
 
 
 
@@ -566,8 +618,6 @@ sanford_res <- time_series_comparison(sanford_fd,
                                       ESM_depths = list(c(15, 30), c(15,30, 60), 
                                                    c(15, 30, 60, 90), c(30, 60)),
                                       MC_depths = list(c(15, 30), c(30)), 
-                                      lat =  43.29586, lon = -89.38068, 
-                                      muname = NULL,
                                       study_name = 'sanford_2012'
 )
 
@@ -581,7 +631,6 @@ venterea_res <- time_series_comparison(venterea_fd,
                                                c(5, 10, 20, 30, 45, 60)),
                           MC_depths = list(c(30), c(20, 30), c(10, 20, 30), 
                  c(5, 10, 20, 30)),
-                 lat = NULL, lon = NULL, 
-                 muname = 'Waukegan silt loam, 0 to 2 percent slopes',
-                 study = 'Venterea_2006.csv')
+                 
+                 study_name = 'Venterea_2006.csv')
 
