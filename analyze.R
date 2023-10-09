@@ -1,12 +1,30 @@
-
+options(warn = -1) 
 source('ESM_and_mass_correction_functions.R')
+#library(constrKriging)
+
+
 
 site_metadata <- read.csv('Source_data/site_metadata.csv')
 
 
+
+get_max_depths <- function(data){
+  return(data$sample_depths[which.max(nchar(data$sample_depths))])
+}
+
+sigmoid <- function(x){
+  return(1/(1+ exp(x*-1)))
+}
+
+logit <- function(p){
+  return(log(p/ (1-p)))
+}
+
 get_site_meta <- function(.study){
-  return (site_metadata %>% filter(study == .study))
   
+  meta <- site_metadata %>% filter(study == .study)
+  if (nrow(meta) == 0){print(paste('Could not find metadata for', .study))}
+  return(meta)
 }
 
 
@@ -20,6 +38,127 @@ read.VanHaden.data <- function(){
 
 
 
+simulate_benchmark.kriged <- function(data, mass_of_quant, n_sims = 500){
+  data <- calc.cumulative_masses(data)
+  model <- kmMonotonic1D(c(0, data$Cum_Min_Soil_g_cm2/max(data$Cum_Min_Soil_g_cm2)),
+                          c(0, data$Cum_SOC_g_cm2), covtype = 'matern3_2' )
+  simulated <- simulate_process.kmMonotonic1D(model, n_sims, newdata = mass_of_quant / max(data$Cum_Min_Soil_g_cm2))
+  
+  return(simulated[1,])
+}
+
+
+sim_benchmark_empirical_errs <- function(data, yest, mass_of_quant, err_fact, nsims = 500){
+  err_sd <- 1/sqrt(sum_weights_mass(data, mass_of_quant)) * err_fact
+  
+  return(yest + rnorm(nsims, 0, err_sd))
+}
+
+sim_benchmark_logit <- function( data, yest, mass_of_quant, nsims = 500, sd_logit = .15){
+  lower_i <- data %>% filter(Cum_Min_Soil_g_cm2 < mass_of_quant) %>% 
+    pull(Cum_Min_Soil_g_cm2) %>% which.max()
+  upper_i <- lower_i + 1
+  dif <- yest-data$Cum_SOC_g_cm2[lower_i]
+  span <- data$Cum_SOC_g_cm2[upper_i] - data$Cum_SOC_g_cm2[lower_i]
+  
+  log_o <- logit(dif/span)
+  
+  
+  
+  return (sigmoid(rnorm(nsims, log_o, sd_logit))* span + data$Cum_SOC_g_cm2[lower_i])
+  
+  
+}
+
+sim_benchmark_proportionate_logit <- function(data, yest, mass_of_quant, nsims = 500, sd_logit = .55){
+  lower_i <- data %>% filter(Cum_Min_Soil_g_cm2 < mass_of_quant) %>% 
+    pull(Cum_Min_Soil_g_cm2) %>% which.max()
+  upper_i <- lower_i + 1
+  dif <- yest-data$Cum_SOC_g_cm2[lower_i]
+  span <- data$Cum_SOC_g_cm2[upper_i] - data$Cum_SOC_g_cm2[lower_i]
+  
+  log_o <- logit(dif/span)
+  distance_to_edge <- min(abs(c(yest-0, yest-1)))
+  return (sigmoid(rnorm(nsims, log_o, sd_logit * distance_to_edge))* span + data$Cum_SOC_g_cm2[lower_i])
+}
+
+
+
+
+sim_all_benchmarks_empirical_errs <- function(FD_data, res_data, depth_of_est, nsims = 500,
+                                              err_factor = .0025){
+  out <- data.frame()
+  FD_data <- calc.cumulative_masses(FD_data)
+  max_depths <- res_data %>% filter(nchar(sample_depths) == max(nchar(res_data$sample_depths))) %>% 
+    pull(sample_depths) %>% first()
+  for (i in seq(1, nrow(distinct(res_data, ID, Ref_ID)))){
+    
+    .ID <- distinct(res_data, ID, Ref_ID)[i,] %>% pull(ID) %>% first()
+    .Ref_ID <- distinct(res_data, ID, Ref_ID)[i,] %>% pull(Ref_ID) %>% first()
+    sim_data <- filter(FD_data, ID == .ID) %>% calc.cumulative_masses()
+    
+    yest <- res_data %>% filter(sample_depths == max_depths &  ID == .ID & Ref_ID == .Ref_ID) %>% 
+      pull(Cum_SOC_g_cm2) %>% first()
+    mass_of_quant <- filter(FD_data, ID == .Ref_ID & Lower_cm == depth_of_est) %>% 
+      pull(Cum_Min_Soil_g_cm2) %>% first()
+    
+    simmed <- sim_benchmark_empirical_errs(sim_data, yest, mass_of_quant, err_fact = err_factor,
+                                           nsims = nsims)
+    
+  
+    out <- rbind(out, data.frame(SOC_benchmark = simmed, ID = .ID, Ref_ID = .Ref_ID,
+                                 simulation.N = seq(1:nsims)))
+    
+  }
+  return (out)
+  }
+
+sim_all_benchmarks_logit<- function(FD_data, res_data, depth_of_est, nsims = 500, sd_logit =.15){
+  out <- data.frame()
+  FD_data <- calc.cumulative_masses(FD_data)
+  max_depths <- res_data %>% filter(nchar(sample_depths) == max(nchar(res_data$sample_depths))) %>% 
+    pull(sample_depths) %>% first()
+  for (i in seq(1, nrow(distinct(res_data, ID, Ref_ID)))){
+     
+    .ID <- distinct(res_data, ID, Ref_ID)[i,] %>% pull(ID) %>% first()
+    .Ref_ID <- distinct(res_data, ID, Ref_ID)[i,] %>% pull(Ref_ID) %>% first()
+    sim_data <- filter(FD_data, ID == .ID) %>% calc.cumulative_masses()
+    
+    yest <- res_data %>% filter(sample_depths == max_depths &  ID == .ID & Ref_ID == .Ref_ID) %>% 
+      pull(Cum_SOC_g_cm2) %>% first()
+    mass_of_quant <- filter(FD_data, ID == .Ref_ID & Lower_cm == depth_of_est) %>% 
+      pull(Cum_Min_Soil_g_cm2) %>% first()
+    
+    
+    #simmed <- sim_benchmark_logit(sim_data, yest, mass_of_quant, nsims, sd_logit )
+    simmed <- sim_benchmark_proportionate_logit(sim_data, yest, mass_of_quant, nsims)
+    out <- rbind(out, data.frame(SOC_benchmark = simmed, ID = .ID, Ref_ID = .Ref_ID,
+                                 simulation.N = seq(1:nsims)))
+    }
+  return (out)
+}
+
+
+sim_all_benchmarks_kriged <- function(FD_data, res_data, depth_of_est, n_sims =500){
+  out <- data.frame()
+  d <- distinct(res_data, ID, Ref_ID) 
+  for (i in seq(1, nrow(distinct(res_data, ID, Ref_ID)))){
+      
+     .ID <- d[i,] %>% pull(ID)
+     .Ref_ID <- d[i,] %>% pull(Ref_ID)
+     print(.ID)
+     mass_of_quant <- FD_data %>% filter(ID == .Ref_ID) %>% calc.cumulative_masses() %>%
+       filter(Lower_cm == depth_of_est) %>% pull(Cum_Min_Soil_g_cm2)%>% first()
+     sim_data <- filter(FD_data, ID == .ID)
+     simmed <- simulate_benchmark.kriged(sim_data, mass_of_quant, n_sims)
+     out <- rbind(out, data.frame(SOC_benchmark = simmed, ID = .ID, Ref_ID = .Ref_ID,
+                                  simulation.N = seq(1:n_sims)))
+     
+  }
+  return (out)
+  
+}
+
 #'compare the ESM and Mass-correction methods on a dataset.
 #'@param fd_data a dataframe: data in the format used by VanHaden
 #'@param ESM_depths a list of vectors: depth combinations to use the ESM method on
@@ -28,9 +167,7 @@ read.VanHaden.data <- function(){
 compare.methods <- function(fd_data,  ESM_depths, MC_depths,
                             depth_of_estimate = 30, lat = NULL, lon = NULL,
                             muname = NULL){
-  
-  
-  
+  #fd_data <- fd_data %>% select(-c('study'))
   comparisons <- fd_data %>% select(ID, Rep, Ref_ID) %>% distinct()
   
   #fixed depth results
@@ -53,34 +190,43 @@ compare.methods <- function(fd_data,  ESM_depths, MC_depths,
   
   all_res <- rbind(FD_res, mass_corr_avg_res, mass_corr_fowler_weights)
   
-  
   for (depth_vals in ESM_depths){
-    ESM_res <-  rbind(df_agg_to_depths(fd_data %>% filter(ID != Ref_ID), depth_vals),
-                          df_agg_to_depths(fd_data %>% filter(ID == Ref_ID), c(depth_of_estimate))
-                                 )%>% 
+    print(depth_vals)
+    sample <- df_agg_to_depths(fd_data %>% filter(ID != Ref_ID), depth_vals)
+    initial <- df_agg_to_depths(fd_data %>% filter(ID == Ref_ID), c(depth_of_estimate))
+    data <- rbind(sample, initial)
+    ESM_res <- data %>% 
       calc_ESM_VanHaden(T, depth_vals) %>% 
       filter(Lower_cm == depth_of_estimate) %>% #only keep the estimate for the depth we are calculating
       mutate(sample_depths = paste(depth_vals, collapse = ', '),
-             method = 'ESM')
+             method = 'ESM') %>% filter(ID != Ref_ID)
     all_res <- rbind(all_res, ESM_res)
-  }
+    
+    if (length(depth_vals) ==2){
+      
+      print('Running exponential decay ESM')
+      print(data )
+      ESM_decay_res <- run_decay_ESM(data, depth_of_estimate) %>% #only keep the estimate for the depth we are calculating
+        mutate(sample_depths = paste(depth_vals, collapse = ', '),
+               method = 'decay_ESM', Type = 'decay_ESM')
+      
+      
+      all_res  <- rbind(all_res, ESM_decay_res)
+      }}
   
   for (depth_vals in MC_depths){
     print(depth_vals)
     to_depths <-  rbind(df_agg_to_depths(fd_data %>% filter(ID != Ref_ID), depth_vals),
-                        df_agg_to_depths(fd_data %>% filter(ID == Ref_ID), c(depth_of_estimate))
-    )
+                        df_agg_to_depths(fd_data %>% filter(ID == Ref_ID), c(depth_of_estimate)))
     
     mass_correction_res <- to_depths %>% 
       group_run_MC(adjustment_factor = 1, quantification_depth = depth_of_estimate) %>% 
       mutate(method = "Mass Correction", 
              sample_depths = paste(depth_vals, collapse = ', '))
     
-   
-    
     all_res <- rbind(all_res, mass_correction_res)
-    
   }
+  
   if (!all(is.na(c(lat, lon, muname)))){
     ssurgo_res <- run_SSurgo_Mass_Corr(lat = lat, lon = lon,
                                        muname = muname, data = fd_data,
@@ -89,8 +235,6 @@ compare.methods <- function(fd_data,  ESM_depths, MC_depths,
     
     all_res <- rbind(all_res, ssurgo_res)
   }
-  
-  
   
   all_res <-all_res %>% ungroup() %>%select(ID, Rep, Upper_cm, Lower_cm, 
                                             Cum_SOC_g_cm2,
@@ -126,6 +270,23 @@ mass_change <- function(FD_data, quant_depth){
   
 }
 
+comparison_summarize_sim <- function(res, FD_data, .ID, depth_of_estimate,
+                                 simulation_function = sim_all_benchmarks_empirical_errs){
+  res <- res %>% arrange(ID) %>% 
+    tidyr::fill(Cum_SOC_g_cm2_baseline, .direction = 'down') %>% 
+    mutate(soc_change = Cum_SOC_g_cm2 - Cum_SOC_g_cm2_baseline, Ref = .ID )
+  
+  simulated_benchmarks <- simulation_function( FD_data, res, depth_of_estimate)
+  res <- res %>% merge(simulated_benchmarks, by = c('ID', 'Ref_ID')) %>% 
+    mutate(dif_from_benchmark = Cum_SOC_g_cm2 - SOC_benchmark,
+           soc_change_benchmark = SOC_benchmark- Cum_SOC_g_cm2_baseline) %>% 
+    
+    left_join(mass_change(FD_data, depth_of_estimate))    
+  
+  return(res)
+}
+
+
 
 comparison_summarize <- function(res, FD_data, .ID, depth_of_estimate){
   res <- res %>% arrange(ID) %>% 
@@ -142,6 +303,7 @@ comparison_summarize <- function(res, FD_data, .ID, depth_of_estimate){
   return(res)
 }
 
+
 run_comparison <- function(FD_data, 
                           ESM_depths, MC_depths, 
                           depth_of_estimate = 30, 
@@ -154,16 +316,15 @@ run_comparison <- function(FD_data,
   if (is.null(.site) & ('Ref_ID' %in% colnames(FD_data))){
       lat <- site_meta %>% pull(lat) %>% first()
       lon <- site_meta %>% pull(lon) %>% first()
-      muname <- site_meta %>% pull(lon) %>% first()
+      muname <- site_meta %>% pull(muname) %>% first()
       
       res <- compare.methods(FD_data, ESM_depths = ESM_depths, MC_depths = MC_depths, 
                              lat = lat, lon = lon, muname = muname) %>% mutate(study_name = study_name)
     
-      all_out <- comparison_summarize(res, FD_data, 0, depth_of_estimate) %>% 
+      all_out <- comparison_summarize_sim(res, FD_data, 0, depth_of_estimate) %>% 
         mutate(weight = 1)
       
   }else{
-    
     if ('site' %in% colnames(FD_data)){
       #if a site is listed in the dataframe, only run comparisons between plots at the same site
       
@@ -198,9 +359,8 @@ run_comparison <- function(FD_data,
                           depth_of_estimate = depth_of_estimate, 
                           lat = lat, lon = lon, muname = muname) %>%
       mutate(study_name = study_name) %>%
-      comparison_summarize(sub_fd, .ID, depth_of_estimate) %>% 
+      comparison_summarize_sim(sub_fd, .ID, depth_of_estimate) %>% 
       mutate(weight = 1/length(unique(FD_data$ID)))
-    
     
     all_out <- rbind(all_out, res)
     
@@ -211,8 +371,6 @@ run_comparison <- function(FD_data,
       }
   }
   
-  
-  
   summary<- all_out %>% group_by(method, sample_depths) %>% 
     summarize(RMSE_from_benchmark = sqrt(mean(dif_from_benchmark**2)), 
               Bias.from.benchmark = mean(dif_from_benchmark * ifelse(mass.change >0, 1, -1)))
@@ -221,14 +379,10 @@ run_comparison <- function(FD_data,
 
 
 #Run comparisons
-
 filtered_FD <- read.VanHaden.data() %>% preprocess.fd.data()
-#filtered_FD <- filtered_FD %>% mutate(Ref_ID = sapply(ID, set_Ref_ID ))
-
-
 
 vanHoden_res <- compare.methods(filtered_FD, 
-                                ESM_depths = list(c(10, 30, 50, 100),  c(10, 30), c(30, 50),
+                                ESM_depths = list( c(10, 30), c(10, 30, 50, 100),  c(30, 50),
                                                   c(10, 30, 50)),
                                 MC_depths = list(c(10,30), c(30)))
 
@@ -258,9 +412,6 @@ source("data_sim.R")
 fowler_sim_data <- simulate.soil.Fowler(soc_profile)
 
 
-#folwer_dt < - fowler_sim_data$fowler_dt
-#sample_dt <- fowler_sim_data$sample_dt
-
 t_dt <- fowler_sim_data$t_dt
 soc_delt_actual <-  fowler_sim_data$true_delta_soc
 
@@ -270,9 +421,6 @@ soc_delt_actual <- soc_delt_actual %>%
                          Ref_ID)
   ) %>% filter(!(grepl('t1', ID) & grepl('t2', Ref_ID))) %>% filter(Ref_ID != ID) %>%
   select(ID, true_change_soc)
-
-
-
 
 
 t_dt <- t_dt %>% filter(scenario != 's1')
@@ -303,7 +451,6 @@ for (sample_data in list(t_dt, y0_rev, y0_rev2))
      
 }
 
-
 fowler.all <- fowler.all %>% merge(fowler.all %>% filter(method == 'Single Depth') 
                                    %>% select(ID, Rep, error) 
                                    %>% rename(FD_error = error),
@@ -311,9 +458,8 @@ fowler.all <- fowler.all %>% merge(fowler.all %>% filter(method == 'Single Depth
   mutate(relative_error = error / abs(FD_error) ) %>% select( -c(FD_error))
 
 fowler.all <- fowler.all %>% distinct(ID, sample_depths, soc_change, .keep_all = TRUE)
-
-
 fowler.all %>% group_by(method, sample_depths) %>% summarize(RMSE = sqrt(mean(error**2)))
+
 
 
 
@@ -327,7 +473,6 @@ time_series_comparison <- function(FD_data, ESM_depths, MC_depths,
   summary <- out$summary
   
   
-  
   #summarize the between-treatment comparisons
   #Compare the calculated differences to the benchmark (ESM on all available data)
   calced_difs <- res %>% filter(ID != 'all_t1') %>% group_by(method, sample_depths) %>% 
@@ -339,7 +484,8 @@ time_series_comparison <- function(FD_data, ESM_depths, MC_depths,
     mutate(method = calced_difs$method, sample_depths = calced_difs$sample_depths)
   calced_difs <- as.df
   
-    max_depths <- as.df %>% filter(nchar(sample_depths) == max(nchar(res$sample_depths))) %>% 
+    max_depths <- as.df %>% 
+    filter(nchar(sample_depths) == max(nchar(res$sample_depths))) %>% 
     pull(sample_depths) %>% first()
   
   benchmark_difs <- as.df %>% filter(sample_depths == max_depths) %>% 
@@ -369,26 +515,14 @@ time_series_comparison <- function(FD_data, ESM_depths, MC_depths,
                                             difs_err = mean_absolute_err,
                                             bias = .bias))
   }
-  
   summary <- merge(summary, differences_summary, by = c('method', 'sample_depths') )
   
-  return (list('summary' = summary, 'res' = res %>% mutate('study' = study_name)))
-}
+  return (list('summary' = summary, 'res' = res %>% mutate('study' = study_name)))}
 
 
-#franz_FD <- read.csv('Source_data/Franzluebbers_2013.csv')  %>% mutate(Rep = 1)
-#muname <- "Cecil fine sandy loam, 2 to 6 percent slopes"  
-#ESM_depths <- list(c(20, 40), c(20,40, 60), c(20, 40, 60, 90), c(40, 60), 
-#                  c(20, 40 ,60, 90, 120), c(20, 40 ,60, 90, 120, 150))
-#MC_depths <- list(c(20, 40), c(40))
 
 
-#franz_summary <- run_comparison(franz_FD, lat= NULL, lon = NULL,
-#                                           muname = muname, ESM_depths = ESM_depths,
-#                                           MC_depths = MC_depths, depth_of_estimate = 40)
-
-
-sainju_FD <- read.csv('Source_data/Sainju_2013.csv') %>% mutate(Rep = 1)
+sainju_FD <- load_study('Sainju_2013')
 muname <- 'Dooley sandy loam, 0 to 4 percent slopes'
 ESM_depths <- list(c(15, 30), c(15,30, 60), c(15, 30, 60, 90), c(30, 60), c(7.5, 15, 30, 60),
                   c(7.5, 15, 30, 60, 90, 120), c(7.5, 15,30))
@@ -399,7 +533,7 @@ sainju_summary <- run_comparison(sainju_FD, ESM_depths = ESM_depths,
                                             )
 
 
-mishra_fd <- read.csv('Source_data/mishra_2010.csv') %>% mutate(Rep = 1)
+mishra_fd <- load_study('mishra_2010')
 study_name = 'mishra_2010'
 mishra_ESM <- list(c(10, 20, 30, 40), c(20, 30), c(10,20,30),
                     c(30, 40), c(20,30, 40))
@@ -411,7 +545,7 @@ mishra_res <- run_comparison(mishra_fd,
         ESM_depths = mishra_ESM, MC_depths = mishra_MC, 
                                     study_name = study_name)
 
-vanDoren_fd <- read.csv('Source_data/Van_doren_1986.csv') %>% mutate(Rep = 1)
+vanDoren_fd <- load_study('Van_doren_1986')
 
 vanDoren_sp_4_t <- run_comparison(vanDoren_fd %>% filter(!grepl('t1', ID)) %>% select(-c(Ref_ID)), 
                                            ESM_depths = list(c(30,40), c(20,30),
@@ -421,13 +555,13 @@ vanDoren_sp_4_t <- run_comparison(vanDoren_fd %>% filter(!grepl('t1', ID)) %>% s
                                                              c(15,30), c(25, 30),
                                                              c(25,30, 35), c(20, 30, 45),
                                                              c(15, 30, 45),
-                                                             c(5, 10, 15, 20, 25, 30, 35, 40)),
+                                                             c(5, 10, 15, 20, 25, 30, 35, 40, 45)),
                                            MC_depths = list(c(25,30), c(20, 30), c(15, 30),
                                                             c(10, 30), c(5,30), c(30)), 
                                   study_name = 'Van_doren_1986')
 
 
-devine_fd <- read.csv('Source_Data/Devine_2014.csv') %>% mutate(Rep = 1)
+devine_fd <- load_study('Devine_2014')
 
 devine_res <-run_comparison(devine_fd, ESM_depths = list(c(5, 15,30, 50, 100),
                                                         c(5, 15, 30), 
@@ -437,9 +571,10 @@ devine_res <-run_comparison(devine_fd, ESM_depths = list(c(5, 15,30, 50, 100),
                                         study_name = 'Devine_2014'
                                         )
 
-blanco_fd <- read.csv('Source_Data/Blanco_Canqui(2008).csv') %>% mutate(Rep = 1)
+blanco_fd <- load_study('Blanco_Canqui(2008)')
 blanco_res <- run_comparison(blanco_fd, 
                              ESM_depths = list(c(5, 10, 30), c(10, 30),  c(30, 50),
+                                               c(30,60),
                                                    c(10, 30, 50), c(10, 30, 50, 60),
                                                    c(5, 10, 30, 50, 60)
                                                    ),
@@ -451,7 +586,7 @@ blanco_res <- run_comparison(blanco_fd,
 
 
 
-venterea_fd <- read.csv('Source_data/Venterea_2006.csv') %>% mutate(Rep = 1)
+venterea_fd <- load_study('Venterea_2006')
 
 venterea_s4_t1 <- run_comparison(venterea_fd %>% filter(years == 2000) %>% select(-c(Ref_ID)),
                                            ESM_depths = list(c(5, 10, 20, 30, 45, 60),
@@ -485,10 +620,10 @@ venterea_s4_t2 <- run_comparison(venterea_fd %>% filter(years == 2005) %>% selec
 
 
 
-chatterjee_fd <- read.csv('Source_data/chatterjee_2009.csv') %>% mutate(Rep = 1)
-
+chatterjee_fd <- load_study('chatterjee_2009')
 chj_res <- run_comparison(chatterjee_fd, 
                                 ESM_depths = list(c(5, 10, 30), c(10, 30),  c(30, 50),
+                                                  c(30,60),
                                                    c(10, 30, 50), c(10, 30, 50, 60),
                                                    c(5, 10, 30, 50, 60)),
                                    MC_depths = list(c(30), c(10, 30), c(5,10,30)),
@@ -496,9 +631,10 @@ chj_res <- run_comparison(chatterjee_fd,
                                    )
     
 
-blanco_fd2 <- read.csv('Source_data/Blanco-canqui_2011.csv') %>% mutate(Rep = 1)
+blanco_fd2 <- load_study('Blanco-canqui_2011')
 blanc_res_2 <- run_comparison(blanco_fd2, ESM_depths = list(c(30,40), c(20,30), c(20,30, 40), c(30,60),
                                                    c(20,30,60), c(20, 30,40, 60),
+                        
                                                    c(15, 20, 30,40, 60),
                                                    c(15,30), c(10, 30),
                                                    c(20, 30, 40, 60, 80),
@@ -510,61 +646,73 @@ blanc_res_2 <- run_comparison(blanco_fd2, ESM_depths = list(c(30,40), c(20,30), 
   )
   
   
-sanford_fd <- read.csv('Source_Data/Sanford2012_data.csv') %>% mutate(Rep = 1)
-sanford_st_res_t2 <- run_comparison(sanford_fd %>% filter(ID != Ref_ID & ID != 'all_t0') %>% 
-                                            select(-c(Ref_ID)),
-                                            ESM_depths = list(c(15, 30), c(15,30, 60), 
-                                                        c(15, 30, 60, 90), c(30, 60)),
-                                            MC_depths = list(c(15, 30), c(30)),
-                                            study_name = 'Sanford_2012'
-  
-                                                                                      )
-
-sanford_st_res_t1 <- run_comparison(sanford_fd %>% filter(ID == Ref_ID & ID != 'all_t1') %>% 
-                                      select(-c(Ref_ID)),
-                                    ESM_depths = list(c(15, 30), c(15,30, 60), 
-                                                      c(15, 30, 60, 90), c(30, 60)),
-                                    MC_depths = list(c(15, 30), c(30)),
-                                    study_name = 'Sanford_2012'
-                                    
-)
-
-poffenbarger_fd <- read.csv('Source_data/poffenbarger_2020.csv') %>% mutate(Rep = 1)
+poffenbarger_fd <- load_study('poffenbarger_2020')
 poffenbarger_res <- run_comparison(poffenbarger_fd, 
                         ESM_depths = list(c(15, 30), 
                         c(30, 60), c(15,30, 60), c(15,30,60, 90) ),
                          MC_depths = list(c(15, 30), c(30)), 
                         study_name = 'poffenbarger_2020')
                          
-                         
+
+yang_FD <- load_study('Yang_1999')    
+yang_res <- run_comparison(yang_FD, 
+                           ESM_depths = list(c(20,30), c(30,40), c(30,50),
+                                             c(20,30, 40), c(20,30,40, 50),
+                                             c(5, 20,30,40), c(5,20,30,50),
+                                             c(5,20, 30,40,50,70,90),
+                                             c(10,30)
+                                             ),
+                           MC_depths = list(c(5,30), c(10,30), c(20,30), c(30)),
+                           study_name = 'Yang_1999')
 
 out_s4t <- rbind(mishra_res$res, blanco_res$res, 
       devine_res$res, vanDoren_sp_4_t$res,
-      sainju_summary$res, sanford_st_res_t1$res, 
-      sanford_st_res_t2$res,
+      sainju_summary$res, 
+      
       venterea_s4_t1$res,
       venterea_s4_t2$res,
       chj_res$res, blanc_res_2$res,
-      poffenbarger_res$res )
+      poffenbarger_res$res,
+      yang_res$res)
 
 
 summarize_res <- function(grouped_res){
   grouped_res %>% summarise(RMSE = sqrt(weighted.mean(dif_from_benchmark**2, weight)), 
-                            RMPSE = sqrt(weighted.mean((dif_from_benchmark /soc_change_benchmark )**2, weight )), 
+                            RMPSE = sqrt(weighted.mean((dif_from_benchmark /SOC_benchmark )**2, weight )), 
                             bias = weighted.mean(dif_from_benchmark * ifelse(mass.change >0, 1, -1), weight), 
-                            MAPE = weighted.mean(abs(dif_from_benchmark/soc_change_benchmark), weight), ,
+                            MAPE_change = weighted.mean(abs(dif_from_benchmark/soc_change_benchmark), weight),
                             Max_err =  max(abs(dif_from_benchmark)),
                             mean_abs_err = mean(abs(dif_from_benchmark)))
 }
 
-out_s4t <- out_s4t %>% distinct(ID, Ref_ID, method, sample_depths, .keep_all = T)
+out_s4t <- out_s4t %>% distinct(ID, Ref_ID, method, sample_depths, simulation.N, .keep_all = T)
 
-ag_res <- out_s4t %>% filter(!grepl('WL_', ID) & ID!= "Forest Succession" & !grepl('WL_', Ref_ID) & Ref_ID != "Forest Succession")
+ag_res <- out_s4t %>% filter(!grepl('WL', ID) & ID!= "Forest Succession" & !grepl('WL', Ref_ID) & Ref_ID != "Forest Succession")
 
 ag_res %>%  group_by(method, sample_depths) %>% summarize_res() %>% 
   filter(sample_depths %in% c('30, 40', '30, 45', '30, 50', '30, 60', '30' ))
 
 
+
+ggplot(ag_res %>% filter(sample_depths %in% c('30, 40', '30, 45', '30, 50', '30, 60')), 
+       aes(mass.change, dif_from_benchmark, color = as.factor(method))) + 
+  geom_violin(alpha = .25) + geom_hline(yintercept  = 0) + 
+  facet_wrap(~sample_depths)
+
+ggplot(ag_res %>% filter(sample_depths %in% c('10, 30', '20, 30', '15, 30')), 
+       aes(mass.change, dif_from_benchmark, color = as.factor(method))) + 
+  geom_point(alpha = .25) + geom_hline(yintercept  = 0) + 
+  facet_wrap(~sample_depths)
+
+
+s<- ag_res %>% filter(sample_depths == '30, 45') %>% pull(study_name) %>% unique()
+dat_to_plot <- ag_res %>% filter(
+  study_name %in% s & ((sample_depths == '30, 45' & grepl('ESM', method)) | 
+  (sample_depths == '30' & 
+     method %in% c('Mass Correction', 'Mass Correction, SSurgo avg', 'Single Depth' ))))
+
+ggplot(dat_to_plot, aes(x = mass.change, y = dif_from_benchmark*100, color = as.factor(method))) + geom_point(alpha = .5) + 
+  geom_hline(yintercept = 0)
 
 
 cross_fold_weights_res <- data.frame()
@@ -614,12 +762,12 @@ vanDoren_res <- time_series_comparison(vanDoren_fd, ESM_depths, MC_depths,
 
 
 
-sanford_res <- time_series_comparison(sanford_fd, 
-                                      ESM_depths = list(c(15, 30), c(15,30, 60), 
-                                                   c(15, 30, 60, 90), c(30, 60)),
-                                      MC_depths = list(c(15, 30), c(30)), 
-                                      study_name = 'sanford_2012'
-)
+#sanford_res <- time_series_comparison(sanford_fd, 
+#                                      ESM_depths = list(c(15, 30), c(15,30, 60), 
+#                                                   c(15, 30, 60, 90), c(30, 60)),
+#                                      MC_depths = list(c(15, 30), c(30)), 
+#                                      study_name = 'Sanford_2012'
+#)
 
 venterea_res <- time_series_comparison(venterea_fd,  
                                     ESM_depths = list(
@@ -630,7 +778,62 @@ venterea_res <- time_series_comparison(venterea_fd,
                                                c(5, 10, 20, 30, 45),
                                                c(5, 10, 20, 30, 45, 60)),
                           MC_depths = list(c(30), c(20, 30), c(10, 20, 30), 
-                 c(5, 10, 20, 30)),
+                 c(5, 10, 20, 30), c(30)),
                  
                  study_name = 'Venterea_2006.csv')
 
+
+
+FD_data <- vanDoren_fd %>% filter(grepl('t2', ID))
+
+id <- "COM_NT"
+
+dat <- rbind(df_agg_to_depths(FD_data, c(5,10,15,20,25,35,40,45)) %>% 
+               mutate(Ref_ID = paste(ID, 'to30', sep = '_')), 
+             df_agg_to_depths(FD_data, c(30)) %>% mutate(ID = paste(ID, 'to30', sep = '_'))
+                                                        )
+
+
+powerset = function(s){
+  len = length(s)
+  l = vector(mode="list",length=2^len) ; l[[1]]=numeric()
+  counter = 1L
+  for(x in 1L:length(s)){
+    for(subset in 1L:counter){
+      counter=counter+1L
+      l[[counter]] = c(l[[subset]],s[x])
+    }
+  }
+  return(l)
+}
+
+errors_empirical <- function(FD_data, depth_to_predict, spline_depths){
+  dat <- rbind(df_agg_to_depths(FD_data, spline_depths) %>% 
+          mutate(Ref_ID = paste(ID, 'to30', sep = '_')), 
+        df_agg_to_depths(FD_data, c(depth_to_predict)) %>% mutate(ID = paste(ID, 'to30', sep = '_')) 
+        %>% mutate(Ref_ID = ID)
+        
+  )
+  cumulative_ESM <- calc_ESM_VanHaden(dat, T, c(depth_to_predict))
+  out <- cumulative_ESM %>% merge(dat%>% calc.cumulative_masses() %>% ungroup() %>% filter(Ref_ID == ID) %>% 
+                                   select(Ref_ID, Cum_SOC_g_cm2), by = 'Ref_ID')
+  return(out$Cum_SOC_g_cm2.x - out$Cum_SOC_g_cm2.y)
+}
+
+
+
+all_errors_empirical <- function(FD_data, depth_to_predict){
+  depth_vals <- FD_data$Lower_cm %>% unique() %>% setdiff(c(depth_to_predict))
+  all_combos <- powerset(depth_vals)
+  out <- data.frame()
+  for (v_set in all_combos[2: length(all_combos)]){
+    errs <- errors_empirical(FD_data, depth_to_predict, v_set)
+    res <- data.frame(matrix(nrow = length(errs), ncol = length(depth_vals)))
+    colnames(res) <- as.character(depth_vals)
+    res[as.character(v_set)] = 1
+    res <- mutate(res, err = errs, ID = unique(FD_data$ID))
+    out <- rbind(out, res)
+  }
+  out[is.na(out)] <-0
+  return(out)
+}
