@@ -164,7 +164,7 @@ sim_all_benchmarks_kriged <- function(FD_data, res_data, depth_of_est, n_sims =5
 #'@param ESM_depths a list of vectors: depth combinations to use the ESM method on
 #'@param MC_depths a list of vectors: depth combinations to use the Mass-correction methods on.
 #'@param depth_of_estimate: numeric: the depth we are trying get an accurate estimate of SOC for.
-compare.methods <- function(fd_data,  ESM_depths, MC_depths,
+compare.methods <- function(fd_data,  ESM_depths, MC_depths, split_core_single_SOC_depths = c(),
                             depth_of_estimate = 30, lat = NULL, lon = NULL,
                             muname = NULL){
   #fd_data <- fd_data %>% select(-c('study'))
@@ -225,6 +225,12 @@ compare.methods <- function(fd_data,  ESM_depths, MC_depths,
              sample_depths = paste(depth_vals, collapse = ', '))
     
     all_res <- rbind(all_res, mass_correction_res)
+  }
+  for (depth_vals in split_core_single_SOC_depths){
+    res <- group_run_joined_sample(fd_data, depth_vals, depth_of_estimate) %>%
+      mutate(method = 'ESM, Single OC test', sample_depths = paste(depth_vals, collapse = ', '))
+    all_res <- rbind(all_res, res)
+    
   }
   
   if (!all(is.na(c(lat, lon, muname)))){
@@ -305,7 +311,8 @@ comparison_summarize <- function(res, FD_data, .ID, depth_of_estimate){
 
 
 run_comparison <- function(FD_data, 
-                          ESM_depths, MC_depths, 
+                          ESM_depths, MC_depths,
+                          split_core_single_SOC_depths = c(),
                           depth_of_estimate = 30, 
                           study_name, .site = NULL){
   
@@ -319,6 +326,7 @@ run_comparison <- function(FD_data,
       muname <- site_meta %>% pull(muname) %>% first()
       
       res <- compare.methods(FD_data, ESM_depths = ESM_depths, MC_depths = MC_depths, 
+                             split_core_single_SOC_depths = split_core_single_SOC_depths,
                              lat = lat, lon = lon, muname = muname) %>% mutate(study_name = study_name)
     
       all_out <- comparison_summarize_sim(res, FD_data, 0, depth_of_estimate) %>% 
@@ -333,6 +341,7 @@ run_comparison <- function(FD_data,
         new_res <- run_comparison(FD_data %>% filter(site == site_name) %>% select(-c(site)),
                                   ESM_depths = ESM_depths,
                                   MC_depths = MC_depths,
+                                  split_core_single_SOC_depths = split_core_single_SOC_depths,
                                   depth_of_estimate = depth_of_estimate,
                                   study_name = study_name, .site = site_name)$res
         all_out <- rbind(all_out, new_res)
@@ -356,6 +365,7 @@ run_comparison <- function(FD_data,
     res <- compare.methods(sub_fd, 
                            ESM_depths = ESM_depths,
                           MC_depths = MC_depths, 
+                          split_core_single_SOC_depths = split_core_single_SOC_depths,
                           depth_of_estimate = depth_of_estimate, 
                           lat = lat, lon = lon, muname = muname) %>%
       mutate(study_name = study_name) %>%
@@ -527,9 +537,12 @@ muname <- 'Dooley sandy loam, 0 to 4 percent slopes'
 ESM_depths <- list(c(15, 30), c(15,30, 60), c(15, 30, 60, 90), c(30, 60), c(7.5, 15, 30, 60),
                   c(7.5, 15, 30, 60, 90, 120), c(7.5, 15,30))
 MC_depths <- list(c(15, 30), c(30), c(7.5, 15, 30))
+single_core_depths = list(c(15,30), c(15,60), c(30,60))
 
 sainju_summary <- run_comparison(sainju_FD, ESM_depths = ESM_depths,
-                                 MC_depths = MC_depths, study_name = 'Sainju_2013'
+                                 MC_depths = MC_depths, 
+                                 split_core_single_SOC_depths = single_core_depths,
+                                 study_name = 'Sainju_2013'
                                             )
 
 
@@ -538,11 +551,12 @@ study_name = 'mishra_2010'
 mishra_ESM <- list(c(10, 20, 30, 40), c(20, 30), c(10,20,30),
                     c(30, 40), c(20,30, 40))
 mishra_MC <- list(c(20, 30), c(10, 20, 30), c(10, 30), c(30))
-
+mishra_splitcore <- list(c(20,30), c(30,40) )
 mishra_fd <- mishra_fd %>% mutate(ID = paste(ID, site, sep = '_'))
 
 mishra_res <- run_comparison(mishra_fd,
         ESM_depths = mishra_ESM, MC_depths = mishra_MC, 
+        split_core_single_SOC_depths = mishra_splitcore,
                                     study_name = study_name)
 
 vanDoren_fd <- load_study('Van_doren_1986')
@@ -552,12 +566,16 @@ vanDoren_sp_4_t <- run_comparison(vanDoren_fd %>% filter(!grepl('t1', ID)) %>% s
                                                              c(20,30,40), c(30, 45),
                                                              c(10, 20,30),
                                                              c(10, 30),
+                                                             c(30,35),
                                                              c(15,30), c(25, 30),
                                                              c(25,30, 35), c(20, 30, 45),
                                                              c(15, 30, 45),
                                                              c(5, 10, 15, 20, 25, 30, 35, 40, 45)),
                                            MC_depths = list(c(25,30), c(20, 30), c(15, 30),
                                                             c(10, 30), c(5,30), c(30)), 
+                                  split_core_single_SOC_depths = list(c(20, 40), c(25,35), c(20,30), c(20, 45),
+                                                                     c(25, 30), c(15,30), c(20, 35), 
+                                                                     c(30,45)),
                                   study_name = 'Van_doren_1986')
 
 
@@ -568,6 +586,7 @@ devine_res <-run_comparison(devine_fd, ESM_depths = list(c(5, 15,30, 50, 100),
                                                           c(15, 30), c(15,30, 50),
                                         c(15, 30, 50), c(15, 30, 50, 100), c(30,50)),
                                         MC_depths = list(c(5, 15, 30), c(30), c(15, 30)),
+                            split_core_single_SOC_depths = list(c(15,30), c(15, 50), c(30,50)),
                                         study_name = 'Devine_2014'
                                         )
 
@@ -579,6 +598,7 @@ blanco_res <- run_comparison(blanco_fd,
                                                    c(5, 10, 30, 50, 60)
                                                    ),
                       MC_depths = list(c(30), c(10, 30)),
+                      split_core_single_MC_depths = list(c(10,30), c(30,50), c(10, 50)),
                      study_name = 'Blanco_Canqui(2008)')
   
   
@@ -600,6 +620,10 @@ venterea_s4_t1 <- run_comparison(venterea_fd %>% filter(years == 2000) %>% selec
                                                              ),
                                            MC_depths = list(c(30), c(20, 30), c(10, 20, 30), 
                                                             c(5, 10, 20, 30)),
+                                 split_core_single_SOC_depths = list(c(20,30), 
+                                                                     c(20, 45),
+                                                                     c(30, 45),
+                                                                     ),
                                            study_name = 'Venterea_2006'
                                            )
 
@@ -615,6 +639,8 @@ venterea_s4_t2 <- run_comparison(venterea_fd %>% filter(years == 2005) %>% selec
                                  ),
                                  MC_depths = list(c(30), c(20, 30), c(10, 20, 30), 
                                                   c(5, 10, 20, 30)),
+                                 split_core_single_SOC_depths = list(c(20,30), c(20, 45),
+                                                                     c(30,45)),
                                  study_name = 'Venterea_2006'
 )
 
@@ -627,6 +653,7 @@ chj_res <- run_comparison(chatterjee_fd,
                                                    c(10, 30, 50), c(10, 30, 50, 60),
                                                    c(5, 10, 30, 50, 60)),
                                    MC_depths = list(c(30), c(10, 30), c(5,10,30)),
+                          split_core_single_SOC_depths = list(c(30,50), c(10,50)),
                                    study_name = 'chatterjee_2009'
                                    )
     
@@ -642,6 +669,7 @@ blanc_res_2 <- run_comparison(blanco_fd2, ESM_depths = list(c(30,40), c(20,30), 
                                                    c(2.5, 5, 10, 15, 20, 30, 40, 60, 80, 100)
   ),
   MC_depths = list(c(30), c(10, 30), c(20, 30), c(15,30)),
+  split_core_single_SOC_depths = list(c(20,40), c(15, 40), c(20,30), c(30,40)),
    study = 'Blanco_Canqui_2011'
   )
   
@@ -650,7 +678,8 @@ poffenbarger_fd <- load_study('poffenbarger_2020')
 poffenbarger_res <- run_comparison(poffenbarger_fd, 
                         ESM_depths = list(c(15, 30), 
                         c(30, 60), c(15,30, 60), c(15,30,60, 90) ),
-                         MC_depths = list(c(15, 30), c(30)), 
+                         MC_depths = list(c(15, 30), c(30)),
+                        split_core_single_SOC_depths = list(c(15,30), c(15,60), c(30,60)),
                         study_name = 'poffenbarger_2020')
                          
 
@@ -663,6 +692,8 @@ yang_res <- run_comparison(yang_FD,
                                              c(10,30)
                                              ),
                            MC_depths = list(c(5,30), c(10,30), c(20,30), c(30)),
+                           split_core_single_SOC_depths = list(c(20, 40), c(20, 50), c(20,30),
+                                                               c(30,40), c(30,50)),
                            study_name = 'Yang_1999')
 
 out_s4t <- rbind(mishra_res$res, blanco_res$res, 
@@ -779,6 +810,7 @@ venterea_res <- time_series_comparison(venterea_fd,
                                                c(5, 10, 20, 30, 45, 60)),
                           MC_depths = list(c(30), c(20, 30), c(10, 20, 30), 
                  c(5, 10, 20, 30), c(30)),
+                
                  
                  study_name = 'Venterea_2006.csv')
 

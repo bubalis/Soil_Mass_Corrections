@@ -67,8 +67,8 @@ solve_decay_params_2depth <- function (x1, x2,  y1,y2){
 
 
 #For a two-depth sample, use the exponential decay function to calculate the equivalent soil mass.
-#Because there are only two observations to fit, the decay curve will fit those 2
-#observations perfectly.
+#Because there are only two observations and two parameters, one version of the curve will fit perfectly.
+
 decay_ESM_two_depth <- function(sample, intial_soil, depth_of_quant){
   sample <- calc.cumulative_masses(sample)
   intial_soil <- calc.cumulative_masses(intial_soil)
@@ -106,7 +106,7 @@ run_decay_ESM <- function(filtered_FD, depth_of_quant){
  #print(nrow(t1.samps))
  
 fn <- function(sample){
-  print(sample)
+  #print(sample)
   intial_soil <- subset(t1.samps, 
                         Ref_ID==first(sample$Ref_ID) &
                           Rep==first(sample$Rep))
@@ -143,22 +143,48 @@ VanHadenFD.from.Fowler.dt <- function(sample_dt){
 
 sim_joined_sample <- function(soil_sample, initial_soil, depth_of_quant = 30){
   mass_of_quantification <- initial_soil %>% filter(Lower_cm == depth_of_quant) %>%
-  pull(Cum_Soil_g_cm_2) %>% first()
-  
+  pull(Cum_Soil_g_cm2) %>% first()
+  print(mass_of_quantification)
   # Simulate a 2-depth sample that is split into two, weighted separately,
   # then mixed to acheive the correct equivalent mass, then has a single SOC test conducted on it
-  masses <- soil_sample %>% pull(Soil_g_cm_2)
+  masses <- soil_sample %>% pull(Soil_g_cm2)
   sum.mass <- sum(masses)
-  if( sum.mass< mass_of_quantification){
-    weights <- c(1, (mass_of_quantification - masses[1])/masses[2] )
-  }else{
-    weights <- c(1,  (sum.mass - mass_of_quantification) / mass[2]) 
-    
-  }
-  return (weighted.mean(soil_sample$SOC, weights) * mass_of_quantification )
+  
+  weights <- c(masses[1],   mass_of_quantification - masses[1] ) / masses[1] 
+  if (masses[1] > mass_of_quantification){
+    weights <- c(1,0)
+  }  
+  
+  
+  pct <- weighted.mean(soil_sample$SOC_pct, weights)
+  print(pct)
+  yout <-  pct * mass_of_quantification /100
+   
+  return (cbind(data.frame(Cum_SOC_g_cm2 =yout), 
+                soil_sample %>% first() %>% select(-c(ID, Rep, Ref_ID, Cum_SOC_g_cm2))) %>%
+    mutate(Upper_cm = 0, Lower_cm = depth_of_quant))
 }
 
-group_run_joined_sample <- function(soil_sample, initial_soil, depth_of_quantification)
+
+
+group_run_joined_sample <- function(soil_data, depths, depth_of_quant = 30){
+  if (length(depths) != 2) {stop('Can only simulate 2-depth cores if depths argument is length 2')}
+  t2.samps <- filter(soil_data, ID != Ref_ID) %>% df_agg_to_depths(depths) %>% calc.cumulative_masses()
+  t1.samps <- filter(soil_data, ID == Ref_ID) %>% calc.cumulative_masses()
+  
+  fn <- function(sample){
+    
+    intial_soil <- subset(t1.samps, 
+                          Ref_ID==first(sample$Ref_ID) &
+                            Rep==first(sample$Rep))
+    return (
+      sim_joined_sample(sample, intial_soil,
+                          depth_of_quant = depth_of_quant))
+
+  }
+  return(t2.samps %>% group_by(ID, Ref_ID, Rep) %>% group_modify(~fn(.), .keep = T))
+}
+
 
 
 #' aggregate a dataframe of soil_data to a given depth.
