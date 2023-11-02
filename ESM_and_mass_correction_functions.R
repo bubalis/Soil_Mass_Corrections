@@ -8,12 +8,13 @@ library(soilDB)
 library(sf)
 library(R.cache)
 
+api_res_dir <- file.path('Temporary_results', 'API_calls')
+
 
 load_study <- function(name){
   path <- file.path('Source_Data', paste(name, 'csv', sep = '.'))
 
-data <-read.csv(path) %>% mutate(Rep = 1, study = name, ID = as.character(ID)) %>% 
-  calc.cumulative_masses()
+data <-read.csv(path) %>% mutate(Rep = 1, study = name, ID = as.character(ID)) 
 
 if ('site' %in% colnames(data)){
   data <- mutate(data, site = as.character(site))
@@ -25,24 +26,131 @@ if ('Ref_ID' %in% colnames(data)){
 if ('prof' %in% colnames(data)){
   data <- select(data, -c(prof))
 }
-return(data )
+return(data %>% calc.cumulative_masses() )
 }
 
 
+make_err_conv_func_log <- function(.coefs, study, use_SOC){
+  study_coef <- .coefs[sapply(names(.coefs),function(x) grepl(study, x))]
+  if ('(Intercept)' %in% names(.coefs)){
+    intercept <- .coefs['(Intercept)']}
+  if ('log(pred_err)' %in% names(.coefs)){
+    intercept <- study_coef
+    .coef <- .coefs['log(pred_err)']
+  }else{
+    .coef <- study_coef
+  } 
+  
+  primary_func <-  function(soil_sample, x) {
+    exp(log((1/sqrt(sum_weights_mass(soil_sample, x))))*.coef + intercept) }
+  
+  
+  if (use_SOC) {
+    return(function(soil_sample, x){
+      primary_func(soil_sample, x) * calc.linear_SOC_pct(soil_sample, x)
+      
+      
+    })
+  }else{
+    return (primary_func)}
+}
 
+
+calc.linear_SOC_pct<- function (soil_sample, mass_to_quantify){
+  soil_sample%>% 
+    filter( lag(Cum_Min_Soil_g_cm2, default = 0) <= mass_to_quantify) %>%
+    slice_max(Cum_Min_Soil_g_cm2) %>%
+    pull(SOC_pct) %>% max()
+}
+
+calc.linear_SOCpct_mass <- function(soil_sample, mass_to_quantify){
+  depth_difs <- soil_sample$Cum_Min_Soil_g_cm2- mass_to_quantify
+  above_ind <- which.max(1/(depth_difs *-1))
+  below_ind <- which.max(1/(depth_difs))
+  
+  if (depth_difs[above_ind]>0 ){
+    above_C <- NA
+  }else{above_C <- soil_sample$SOC_pct[above_ind]}
+  if (depth_difs[below_ind]<0 ){
+    below_C <- NA
+  }else{below_C <- soil_sample$SOC_pct[below_ind]}
+  
+  weights <- 1/abs(depth_difs[c(above_ind, below_ind)])
+  
+  
+  
+  return( weighted.mean(c(above_C, below_C), 
+                        1/abs(depth_difs[c(above_ind, below_ind)]),
+                        na.rm = T))}
+
+make_zerodepth_row <- function(soil_sample){
+  return(data.frame(ID = first(soil_sample$ID),Lower_cm = 0, Upper_cm = 0,
+                    Cum_Min_Soil_g_cm2 = 0, Cum_Soil_g_cm2 = 0,
+                    Cum_SOC_g_cm2 = 0, Cum_SOM_g_cm2 = 0,
+                    SOC_g_cm2 = 0, SOM_g_cm2 = 0, Soil_g_cm2 = 0
+                    ))
+  
+}
+
+
+sum_weights_SOCmass_logit <- function(soil_sample, y_est){
+  SOC <- soil_sample$Cum_SOC_g_cm2
+  zero_val <- SOC[SOC < y_est] %>% max()
+  top_val <- SOC[SOC > y_est] %>% min()
+  normed <- (SOC - zero_val) / (top_val - zero_val)
+  
+  below_weights <- sum(1 / normed[normed<0]**2)
+  above_weights <- sum(1 / (normed[normed>1]-1)**2 )
+  
+  if (length(above_weights) == 0){
+    above_weights <- 0
+  }
+  if (length(below_weights) == 0){
+    below_weights <- 0
+  }
+  
+  return (list (weights = (sqrt(below_weights)+ sqrt(above_weights))**2,
+                yest_p =  (y_est - zero_val) / (top_val - zero_val)
+                )
+    
+    
+  )
+}
+
+sum_weights_mass_2 <- function(soil_sample, mass_to_quantify){
+  #calculate the total weight for the sample data, this should be proportional to total error.
+  
+  
+  below_weights <- filter(soil_sample, Cum_Min_Soil_g_cm2 <= mass_to_quantify) %>% 
+    summarize(x = abs(sum(1/ ((Cum_Min_Soil_g_cm2 - mass_to_quantify))))) %>%
+    pull(x)
+  
+  above_weights <- filter(soil_sample, Cum_Min_Soil_g_cm2 >= mass_to_quantify) %>% 
+    summarize(x = sum(1/ ((Cum_Min_Soil_g_cm2 - mass_to_quantify)))) %>% 
+    pull(x)
+  
+  if (length(above_weights) == 0){
+    above_weights <- 0
+  }
+  if (length(below_weights) == 0){
+    below_weights <- 0
+  }
+  
+  return( (sqrt(below_weights) + sqrt(above_weights))**2 )}
 
 
 sum_weights_mass <- function(soil_sample, mass_to_quantify){
   #calculate the total weight for the sample data, this should be proportional to total error.
+  soil_sample <- ungroup(soil_sample)
   
-  
-  below_weights <- filter(soil_sample, Cum_Min_Soil_g_cm2 < mass_to_quantify) %>% 
+  below_weights <- filter(soil_sample, Cum_Min_Soil_g_cm2 <= mass_to_quantify) %>% 
     summarize(x = sum(1/ ((Cum_Min_Soil_g_cm2 - mass_to_quantify)**2))) %>%
     pull(x)
   
-  above_weights <- filter(soil_sample, Cum_Min_Soil_g_cm2 > mass_to_quantify) %>% 
+  above_weights <- filter(soil_sample, Cum_Min_Soil_g_cm2 >= mass_to_quantify) %>% 
     summarize(x = sum(1/ ((Cum_Min_Soil_g_cm2 - mass_to_quantify)**2))) %>% 
     pull(x)
+  
   if (length(above_weights) == 0){
     above_weights <- 0
   }
@@ -58,8 +166,9 @@ sum_weights_mass <- function(soil_sample, mass_to_quantify){
 #get decay parameters for the exponential decay model of SOC stock with depth
 solve_decay_params_2depth <- function (x1, x2,  y1,y2){
   func <- function(b){(exp(-b * x2) -1) / (exp(-b* x1) -1) * y1 - y2 }
+  
   b <- uniroot(func, lower = -1, upper = 1)$root
-  #b <- y2/ (y1 * (x2-x1)) * exp(-1)
+  
   a <- y1/ (exp(-b* x1 ) -1) * -b
   return(list( 'a' =a, 'b' = b))
 }
@@ -68,17 +177,33 @@ solve_decay_params_2depth <- function (x1, x2,  y1,y2){
 
 #For a two-depth sample, use the exponential decay function to calculate the equivalent soil mass.
 #Because there are only two observations and two parameters, one version of the curve will fit perfectly.
-
+#This can also be used for a single depth sample
 decay_ESM_two_depth <- function(sample, intial_soil, depth_of_quant){
   sample <- calc.cumulative_masses(sample)
   intial_soil <- calc.cumulative_masses(intial_soil)
+  
+  #if there is only one depth in the sample
+  #add a zero row
+  if (nrow(sample) == 1){
+    row1 <- make_zerodepth_row(sample)
+    row2 <- sample %>% filter(Lower_cm == max(Lower_cm))
+  }else if(nrow(sample == 2)){
   row1 <- sample %>% filter(Upper_cm == 0)
   row2 <- sample %>% filter(Lower_cm == max(Lower_cm))
-  
+  }else{
+    stop('2-depth decay fitting only works with 2 depths')
+  }
   
   mass1 <- intial_soil %>% filter(Lower_cm == depth_of_quant) %>% pull(Cum_Min_Soil_g_cm2)
   mass2 <- sample %>% filter(Lower_cm == depth_of_quant) %>% pull(Cum_Min_Soil_g_cm2)
   
+  bd_at_quant_mass <- sample %>% filter(Cum_Min_Soil_g_cm2 < depth_of_quant) %>% 
+    pull(BD_g_cm3) %>% last()
+  
+  
+  if (length(bd_at_quant_mass) == 0){
+    bd_at_quant_mass <- sample %>% pull(BD_g_cm3) %>% first()
+  }
   
   
   decay_params <- solve_decay_params_2depth(row1 %>% pull(Lower_cm), 
@@ -88,12 +213,13 @@ decay_ESM_two_depth <- function(sample, intial_soil, depth_of_quant){
   a <- decay_params$a
   b <- decay_params$b
   
-  depth_adj <- mass1 /mass2
+  depth_adj <- (mass1  - mass2) / bd_at_quant_mass
   
-  yout <- -(a/b) * (exp(-b * depth_of_quant * depth_adj)-1)
+  yout <- -(a/b) * (exp(-b * (depth_of_quant + depth_adj))-1)
   
   out <- cbind(data.frame(Cum_SOC_g_cm2 =yout), 
-               data.frame(row2) %>% select(-c(ID, Rep, Ref_ID, Cum_SOC_g_cm2))) 
+               data.frame(row2) %>% 
+                 select(-c(ID, Rep, Ref_ID, Cum_SOC_g_cm2))) 
   
   return(out)
 }
@@ -131,7 +257,8 @@ VanHadenFD.from.Fowler.dt <- function(sample_dt){
   as_fd <- sample_dt %>% 
     mutate(Upper_cm = depth - depth_inc, SOM_pct = soc * 1.9, BD = BD * 10) %>%
     rename(SOC_pct = soc, BD_g_cm3 = BD, Lower_cm = depth) %>%
-    select(ID, Rep, Ref_ID, Upper_cm, Lower_cm, SOC_pct, SOM_pct, BD_g_cm3, interval,
+    select(ID, Rep, Ref_ID, Upper_cm, Lower_cm, 
+           SOC_pct, SOM_pct, BD_g_cm3, interval,
            scenario )
   
   
@@ -144,11 +271,10 @@ VanHadenFD.from.Fowler.dt <- function(sample_dt){
 sim_joined_sample <- function(soil_sample, initial_soil, depth_of_quant = 30){
   mass_of_quantification <- initial_soil %>% filter(Lower_cm == depth_of_quant) %>%
   pull(Cum_Soil_g_cm2) %>% first()
-  print(mass_of_quantification)
+  #print(mass_of_quantification)
   # Simulate a 2-depth sample that is split into two, weighted separately,
   # then mixed to acheive the correct equivalent mass, then has a single SOC test conducted on it
   masses <- soil_sample %>% pull(Soil_g_cm2)
-  sum.mass <- sum(masses)
   
   weights <- c(masses[1],   mass_of_quantification - masses[1] ) / masses[1] 
   if (masses[1] > mass_of_quantification){
@@ -157,9 +283,9 @@ sim_joined_sample <- function(soil_sample, initial_soil, depth_of_quant = 30){
   
   
   pct <- weighted.mean(soil_sample$SOC_pct, weights)
-  print(pct)
+  #print(pct)
   yout <-  pct * mass_of_quantification /100
-   
+  print(yout)
   return (cbind(data.frame(Cum_SOC_g_cm2 =yout), 
                 soil_sample %>% first() %>% select(-c(ID, Rep, Ref_ID, Cum_SOC_g_cm2))) %>%
     mutate(Upper_cm = 0, Lower_cm = depth_of_quant))
@@ -169,8 +295,12 @@ sim_joined_sample <- function(soil_sample, initial_soil, depth_of_quant = 30){
 
 group_run_joined_sample <- function(soil_data, depths, depth_of_quant = 30){
   if (length(depths) != 2) {stop('Can only simulate 2-depth cores if depths argument is length 2')}
-  t2.samps <- filter(soil_data, ID != Ref_ID) %>% df_agg_to_depths(depths) %>% calc.cumulative_masses()
-  t1.samps <- filter(soil_data, ID == Ref_ID) %>% calc.cumulative_masses()
+  t2.samps <- filter(soil_data, ID != Ref_ID) %>% 
+    df_agg_to_depths(depths) %>% 
+    calc.cumulative_masses()
+  
+  t1.samps <- filter(soil_data, ID == Ref_ID) %>% 
+    calc.cumulative_masses()
   
   fn <- function(sample){
     
@@ -182,7 +312,8 @@ group_run_joined_sample <- function(soil_data, depths, depth_of_quant = 30){
                           depth_of_quant = depth_of_quant))
 
   }
-  return(t2.samps %>% group_by(ID, Ref_ID, Rep) %>% group_modify(~fn(.), .keep = T))
+  return(t2.samps %>% group_by(ID, Ref_ID, Rep) %>% 
+           group_modify(~fn(.), .keep = T))
 }
 
 
@@ -193,13 +324,15 @@ agg_to_depth <- function(soil_data, bottom_depth, top_depth){
   to_depth <- soil_data %>% filter(Lower_cm <= bottom_depth & Upper_cm >= top_depth )
   depths <- to_depth$Lower_cm -to_depth$Upper_cm
   soc_weights <- depths * to_depth$BD_g_cm3
-  agged <- to_depth %>% summarize(SOC_pct = weighted.mean(SOC_pct, soc_weights), 
-                                  SOM_pct = weighted.mean(SOM_pct, soc_weights), 
-                                  BD_g_cm3 = weighted.mean(BD_g_cm3, depths),
-                                  Upper_cm = min(Upper_cm),
-                                  Lower_cm = max(Lower_cm),
-                                  #Ref_ID = first(Ref_ID), 
-                                  #ID = first(ID)
+  agged <- to_depth %>% 
+    summarize(
+      SOC_pct = weighted.mean(SOC_pct, soc_weights), 
+                SOM_pct = weighted.mean(SOM_pct, soc_weights), 
+                BD_g_cm3 = weighted.mean(BD_g_cm3, depths),
+                Upper_cm = min(Upper_cm),
+                Lower_cm = max(Lower_cm),
+                #Ref_ID = first(Ref_ID), 
+                #ID = first(ID)
                                   )
   
   return (agged)
@@ -210,19 +343,21 @@ agg_to_depth <- function(soil_data, bottom_depth, top_depth){
 #'for instance: if new_depths = c(30, 50) simulates soil sampling to the depth of 
 #'30cm and 50cm 
 agg_to_depths <- function(soil_data, new_depths){
-  
+  new_depths <- new_depths[order(new_depths)]
   if (!all(new_depths %in% soil_data$Lower_cm)){
     stop(gettextf("Error, can only aggregate to soil depths found in existing sample"))
   }
   
-  new_tops <- lag(new_depths) %>% replace_na(0)
+  new_tops <- dplyr::lag(new_depths) %>% replace_na(0)
   
   
   new_soil_data <-data.frame()
   for (i in seq(1:length(new_depths))){
     
-    new_soil_data <- rbind(new_soil_data, 
-                           agg_to_depth(soil_data, new_depths[i], new_tops[i]))
+    new_soil_data <- rbind(
+      new_soil_data, 
+      agg_to_depth(soil_data, new_depths[i], new_tops[i])) %>% 
+      arrange(Lower_cm)
     
   }
   return (new_soil_data)
@@ -233,11 +368,21 @@ agg_to_depths <- function(soil_data, new_depths){
 df_agg_to_depths <- function(soil_data, new_depths){
   
   return (soil_data %>% group_by(ID, Rep, Ref_ID) %>% 
-            group_modify(~ agg_to_depths(.,  new_depths = new_depths
+            group_modify(~ agg_to_depths(.,  
+                                         new_depths = new_depths
                                          ), .keep = T
           ))
     }
 
+
+
+
+estBetaParams <- function(mu, var){
+  #Estimate parameters for the beta distribution based on a mean and a variance
+  alpha <- abs(( ((1-mu) /var) - 1/mu) * mu^2)
+  beta <- ((1-mu)/var) * mu * (1-mu)
+  return (list(alpha = alpha, beta = beta))
+}
 
 get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
   print('Making API Call')
@@ -288,13 +433,16 @@ get_ssurgo_depth_dat <- function(lat = NULL, lon = NULL, muname =NULL){
     arrange(hzdept_r) %>% 
     mutate(cumulative_soil_mass = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) )) %>% 
     mutate(cumulative_soc = cumsum(dbovendry_r * (hzdepb_r - hzdept_r) * om_r/1.9/100 )) %>% 
-    mutate(cumulative_min_soil = cumulative_soil_mass - (cumulative_soc * 1.9), 
-           hzdepb_r = hzdepb_r - min(hzdept_r),   hzdept_r = hzdept_r - min(hzdept_r))
+    mutate(
+      cumulative_min_soil = cumulative_soil_mass - (cumulative_soc * 1.9), 
+      hzdepb_r = hzdepb_r - min(hzdept_r),   hzdept_r = hzdept_r - min(hzdept_r))
     
   
   return(dt)}
 
 get_ssurgo_depth_dat <- addMemoization(get_ssurgo_depth_dat)
+
+
 
 get_SSurgo_exp_decay_params <- function(lat, lon, muname){
   d <- get_ssurgo_depth_dat(lat,lon, muname)
@@ -323,6 +471,10 @@ get_SSurgo_spline_ESM<- function(lat, lon, muname){
   return (fitted.spline)  
 }
 
+decay_SOC_model <-function(x, a, b){
+  -(a/b) * (exp(-b * x)-1)}
+
+
 decay_ESM <- function(cum_min_soil_t0,
                           cum_min_soil_t1, 
                           cum_SOC_to_depth_t1,
@@ -333,7 +485,7 @@ decay_ESM <- function(cum_min_soil_t0,
   adj_depth <- cum_min_soil_t0/ cum_min_soil_t1 * depth_of_quant
   
   quant_depths <- c(depth_of_quant, adj_depth)
-  yout <- -(a/b) * (exp(-b * quant_depths)-1)
+  yout <- decay_SOC_model(quant_depths, a,b)
   soc_ratio <- cum_SOC_to_depth_t1 / yout[1]
   
   soc_estimate <- soc_ratio * yout[2]
@@ -437,7 +589,8 @@ preprocess.fd.data <- function(raw_FD){
   
   # Remove cores that do not have a surface (0 cm) sample
   filtered_FD <- reduced_FD %>% group_by(ID, Rep) %>%
-    filter(min(Upper_cm) == 0) %>% drop_na %>% # Remove samples that have NAs
+    filter(min(Upper_cm) == 0) %>% 
+    drop_na %>%
     arrange(ID, Rep, Upper_cm, Lower_cm) #
   
   
@@ -473,9 +626,9 @@ preprocess.fd.data <- function(raw_FD){
 
 #'Calculate layer and cumulative masses for soil data.
 #'
-calc.cumulative_masses <- function(soil_data){
+calc.cumulative_masses <- function(soil_data, override = F){
   # Calculate soil mass in each interval
-  if ('Cum_Min_Soil_g_cm2' %in% colnames(soil_data)){
+  if ('Cum_Min_Soil_g_cm2' %in% colnames(soil_data) & !override){
     return(soil_data)
   }else{ 
   return (
@@ -483,8 +636,7 @@ calc.cumulative_masses <- function(soil_data){
     #SOC and SOM mass of intervals
     mutate(SOC_g_cm2 = (SOC_pct/100)*Soil_g_cm2,
            SOM_g_cm2 = (SOM_pct/100)*Soil_g_cm2) %>%
-    #mineral mass of intervals
-    mutate(Min_Soil_g_cm2 = Soil_g_cm2 - SOM_g_cm2) %>%
+    mutate(Min_Soil_g_cm2 = Soil_g_cm2 - SOM_g_cm2) %>%  #mineral mass of intervals
     group_by(ID, Rep) %>%
     mutate(Cum_Soil_g_cm2 = cumsum(Soil_g_cm2),
            Cum_SOC_g_cm2 = cumsum(SOC_g_cm2),
@@ -495,13 +647,29 @@ calc.cumulative_masses <- function(soil_data){
 
 
 
-hyman_extrapolating_spline <- function(xin, yin, xout){
+hyman_extrapolating_spline <- function(xin, yin, xout, deriv = 0){
+  fun <- yman_extrapolating_splinefun(xin, yin)
+  
+  return (fun(xout, deriv))
+  
+}
+
+hyman_extrapolating_splinefun <- function(xin, yin){
   fun <- splinefun(xin, yin, method = 'hyman')
-  yout <- rep(NA, length(xout))
-  yout[xout <= max(xin)] <- fun(xout[xout <= max(xin)])
-  yout[xout> max(xin)] <- fun(max(xin)) + (xout[xout > max(xin)] - max(xin)) * fun(max(xin), deriv = 1) 
-    
-  return(yout)
+  fun_to_return <- function(xout, deriv){
+    yout <- rep(NA, length(xout))
+    yout[xout <= max(xin)] <- fun(xout[xout <= max(xin)], deriv = deriv)
+    deriv_at_max <- fun(max(xin), deriv = 1) 
+    if (deriv == 0){
+      yout[xout> max(xin)] <- fun(max(xin)) + (xout[xout > max(xin)] - max(xin)) * deriv_at_max
+      
+    }else if (deriv == 1){
+      yout[xout> max(xin)] <- deriv_at_max
+      
+    }
+    return (yout)
+  }
+  return(fun_to_return)
 }
 
 
@@ -547,6 +715,7 @@ calc_ESM_VanHaden <- function(filtered_FD, extrapolation, ESM_depths_cm, return_
     current_Rep <- subset(cumulative_FD, ID==current_vals$ID &
                             Ref_ID==current_vals$Ref_ID &
                             Rep==current_vals$Rep)
+    
     if (current_vals$ID != current_vals$Ref_ID){
     # Subset the reference set of values
     current_refs <- subset(cumulative_FD, ID==current_vals$Ref_ID)
@@ -684,21 +853,30 @@ linear_mass_correction <- function(intial_soil, sample, quantification_depth =30
   intial_soil <- calc.cumulative_masses(intial_soil)
   
   
-  mass1 <- intial_soil %>% filter(Lower_cm == quantification_depth) %>% pull(Cum_Min_Soil_g_cm2)
-  mass2 <- sample %>% filter(Lower_cm == quantification_depth) %>% pull(Cum_Min_Soil_g_cm2)
+  mass1 <- intial_soil %>% 
+    filter(Lower_cm == quantification_depth) %>% 
+    pull(Cum_Min_Soil_g_cm2)
+  
+  mass2 <- sample %>% 
+    filter(Lower_cm == quantification_depth) %>% 
+    pull(Cum_Min_Soil_g_cm2)
   
   new_depth <- quantification_depth * mass1/mass2
   
   delta_d <- new_depth - quantification_depth
   
   
-  soc_to_depth <- sample %>% filter(Lower_cm == quantification_depth) %>% 
-    pull(Cum_SOC_g_cm2) %>% max()
+  soc_to_depth <- sample %>% 
+    filter(Lower_cm == quantification_depth) %>% 
+    pull(Cum_SOC_g_cm2) %>% 
+    max()
+  
   if (soc_to_depth == -Inf){soc_upper_layers <-0}
   # Calculate the corrected total SOC stock Eq.5
   
   
-  soc_adjust <- sample %>% filter(Upper_cm <= new_depth) %>% last() %>%
+  soc_adjust <- sample %>% filter(Upper_cm <= new_depth) %>% 
+    last() %>%
     summarize(delta_d  * SOC_pct/100 * BD_g_cm3 * adjust_factor) %>%
     ungroup() %>% pull()
   
@@ -713,9 +891,10 @@ linear_mass_correction <- function(intial_soil, sample, quantification_depth =30
   
   
   # Collect the corrected soil values
-  temp = as.data.frame(list("Min_mass_soil_g_cm2" =        Min_mass_soil_g_cm2,
-                            "Cum_SOC_g_cm2"= SOC_Stock_g_cm2, 
-                            'depth' = new_depth))
+  temp = as.data.frame(
+    list("Min_mass_soil_g_cm2" = Min_mass_soil_g_cm2,
+          "Cum_SOC_g_cm2"= SOC_Stock_g_cm2, 
+          'depth' = new_depth))
   
   return(temp)
 }
@@ -758,11 +937,20 @@ run_SSurgo_Mass_Corr <- function(lat = NULL, lon = NULL, muname = NULL, data,
   one_depth <- data %>% df_agg_to_depths(c(depth_of_estimate)) %>% calc.cumulative_masses()
   Ids <- one_depth %>% filter(ID != Ref_ID) %>% pull(ID) 
   
+  
   use_ssurgo_for_MC_spline <- function(ID_){
-    .Ref_ID <- filter(one_depth, ID == ID_) %>% pull(Ref_ID) %>% first()
-    cum_min_soil_t0 <- filter(one_depth, ID == .Ref_ID) %>% pull(Cum_Min_Soil_g_cm2)
-    cum_min_soil_t1 <- filter(one_depth, ID == ID_) %>% pull(Cum_Min_Soil_g_cm2)
-    cum_soc_to_depth_t1 <- filter(one_depth, ID == ID_) %>% pull(Cum_SOC_g_cm2)
+    .Ref_ID <- filter(one_depth, ID == ID_) %>% 
+      pull(Ref_ID) %>% 
+      first()
+    
+    cum_min_soil_t0 <- filter(one_depth, ID == .Ref_ID) %>% 
+      pull(Cum_Min_Soil_g_cm2)
+    
+    cum_min_soil_t1 <- filter(one_depth, ID == ID_) %>% 
+      pull(Cum_Min_Soil_g_cm2)
+    
+    cum_soc_to_depth_t1 <- filter(one_depth, ID == ID_) %>% 
+      pull(Cum_SOC_g_cm2)
     
     adj_factor <- Ssurgo_spline_MC( cum_min_soil_t0,
                                     cum_min_soil_t1,
@@ -786,11 +974,19 @@ run_SSurgo_Mass_Corr <- function(lat = NULL, lon = NULL, muname = NULL, data,
                                         soc_change = NA)
   
   exp_decay_factors <- get_SSurgo_exp_decay_params(lat, lon, muname)
+  
   use_ssurgo_for_MC_EXP <- function(ID_){
-    .Ref_ID <- filter(one_depth, ID == ID_) %>% pull(Ref_ID) %>% first()
-    cum_min_soil_t0 <- filter(one_depth, ID == .Ref_ID) %>% pull(Cum_Min_Soil_g_cm2)
-    cum_min_soil_t1 <- filter(one_depth, ID == ID_) %>% pull(Cum_Min_Soil_g_cm2)
-    cum_soc_to_depth_t1 <- filter(one_depth, ID == ID_) %>% pull(Cum_SOC_g_cm2)
+    .Ref_ID <- filter(one_depth, ID == ID_) %>% 
+      pull(Ref_ID) %>% first()
+    
+    cum_min_soil_t0 <- filter(one_depth, ID == .Ref_ID) %>% 
+      pull(Cum_Min_Soil_g_cm2)
+    
+    cum_min_soil_t1 <- filter(one_depth, ID == ID_) %>% 
+      pull(Cum_Min_Soil_g_cm2)
+    
+    cum_soc_to_depth_t1 <- filter(one_depth, ID == ID_) %>% 
+      pull(Cum_SOC_g_cm2)
     
     return(decay_ESM(cum_min_soil_t0,
                           cum_min_soil_t1, 
@@ -800,15 +996,17 @@ run_SSurgo_Mass_Corr <- function(lat = NULL, lon = NULL, muname = NULL, data,
     
   }
   res2 <- sapply(Ids, use_ssurgo_for_MC_EXP)
+  
   MC_ssurgo_2 <- data.frame(Cum_SOC_g_cm2=res2, ID = names(res2),
              method = 'Mass Correction, SSurgo EXP',
-             sample_depths = depth_of_estimate, Rep = 1, Cum_SOC_g_cm2_baseline = NA,
-             
+             sample_depths = depth_of_estimate, Rep = 1, 
+             Cum_SOC_g_cm2_baseline = NA,
              soc_change = NA)
   
   MC_ssurgo_3 <- data.frame(Cum_SOC_g_cm2=(res + res2)/2, ID = names(res2),
                             method = 'Mass Correction, SSurgo avg',
-                            sample_depths = depth_of_estimate, Rep = 1, Cum_SOC_g_cm2_baseline = NA,
+                            sample_depths = depth_of_estimate, Rep = 1, 
+                            Cum_SOC_g_cm2_baseline = NA,
                             
                             soc_change = NA)
   
